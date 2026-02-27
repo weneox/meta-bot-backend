@@ -10,7 +10,7 @@ if (!fetchFn) {
     const undici = await import("undici");
     fetchFn = undici.fetch;
   } catch {
-    // heç nə — aşağıda error verəcəyik
+    // fetch yoxdursa, forwardToN8n error qaytaracaq
   }
 }
 
@@ -32,33 +32,35 @@ function safeStr(x) {
   return typeof x === "string" ? x : "";
 }
 
-function baseUrl(req) {
-  const proto = (req.headers["x-forwarded-proto"] || "https").toString().split(",")[0].trim();
-  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString().split(",")[0].trim();
+function getBaseUrl(req) {
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https")
+    .toString()
+    .split(",")[0]
+    .trim();
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "")
+    .toString()
+    .split(",")[0]
+    .trim();
   return host ? `${proto}://${host}` : "";
 }
 
 function pickFirstTextEvent(body) {
   // Facebook Messenger/IG classic format: entry[].messaging[]
   // Instagram Graph / WhatsApp Cloud format: entry[].changes[]
-  // Biz hamısını yoxlayırıq.
-
   const items = [];
 
   if (Array.isArray(body?.entry)) {
     for (const entry of body.entry) {
-      // 1) messaging
       if (Array.isArray(entry?.messaging)) {
         for (const m of entry.messaging) items.push(m);
       }
-      // 2) changes
       if (Array.isArray(entry?.changes)) {
         for (const c of entry.changes) items.push(c);
       }
     }
   }
 
-  // A) messaging event
+  // A) messaging event (IG classic)
   for (const ev of items) {
     const text = safeStr(ev?.message?.text);
     if (text) {
@@ -67,7 +69,6 @@ function pickFirstTextEvent(body) {
         userId: safeStr(ev?.sender?.id),
         text,
         timestamp: ev?.timestamp || Date.now(),
-        raw: ev,
       };
     }
   }
@@ -84,11 +85,10 @@ function pickFirstTextEvent(body) {
         userId: safeStr(value?.contacts?.[0]?.wa_id) || safeStr(value?.messages?.[0]?.from),
         text: waText,
         timestamp: value?.messages?.[0]?.timestamp ? Number(value.messages[0].timestamp) * 1000 : Date.now(),
-        raw: ev,
       };
     }
 
-    // IG comments/messages can vary; for now only capture generic "message"
+    // IG variants
     const igText =
       safeStr(value?.message) ||
       safeStr(value?.text) ||
@@ -101,7 +101,6 @@ function pickFirstTextEvent(body) {
         userId: safeStr(value?.from?.id) || safeStr(value?.sender?.id) || safeStr(value?.user_id),
         text: igText,
         timestamp: Date.now(),
-        raw: ev,
       };
     }
   }
@@ -144,11 +143,11 @@ app.get("/", (req, res) => {
 });
 
 /**
- * ✅ Privacy Policy URL üçün:
+ * ✅ Privacy Policy URL:
  * https://meta-bot-backend-production.up.railway.app/privacy
  */
 app.get("/privacy", (req, res) => {
-  const b = baseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
+  const b = getBaseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
   res
     .status(200)
     .set("Content-Type", "text/html; charset=utf-8")
@@ -159,7 +158,7 @@ app.get("/privacy", (req, res) => {
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>Privacy Policy - NEOX Automation</title>
   <style>
-    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.5}
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.6}
     code{background:#f2f2f2;padding:2px 6px;border-radius:6px}
   </style>
 </head>
@@ -184,7 +183,7 @@ app.get("/privacy", (req, res) => {
   <p>We keep only minimal logs for debugging and reliability. You may request deletion.</p>
 
   <h2>Data deletion request</h2>
-  <p>You can request deletion via: <code>${b}/instagram/data-deletion</code></p>
+  <p>Deletion URL: <code>${b}/instagram/data-deletion</code></p>
 
   <h2>Contact</h2>
   <p>Email: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>
@@ -193,22 +192,34 @@ app.get("/privacy", (req, res) => {
 });
 
 /**
- * ✅ Deauthorize callback URL üçün:
+ * ✅ Deauthorize callback URL:
  * https://meta-bot-backend-production.up.railway.app/instagram/deauthorize
+ * (Meta bura bəzən GET, bəzən POST vura bilir — ikisini də açıq saxlayırıq)
  */
+app.get("/instagram/deauthorize", (req, res) => {
+  res.status(200).send("OK");
+});
 app.post("/instagram/deauthorize", (req, res) => {
-  // Meta bura user token revoke olanda vurur (indi sadəcə 200 qaytarırıq)
   res.status(200).json({ ok: true });
 });
 
 /**
- * ✅ Data deletion request URL üçün:
+ * ✅ Data deletion request URL:
  * https://meta-bot-backend-production.up.railway.app/instagram/data-deletion
+ *
+ * Meta UI validation üçün GET vura bilər.
+ * Real data deletion callback üçün POST (JSON) gözlənir.
  */
+app.get("/instagram/data-deletion", (req, res) => {
+  // Meta validate üçün sadəcə 200 görsün
+  res.status(200).send("Data deletion endpoint ready");
+});
+
 app.post("/instagram/data-deletion", (req, res) => {
-  // Meta üçün standart cavab: "url" + "confirmation_code"
-  const b = baseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
+  // Meta standard cavab: "url" + "confirmation_code"
+  const b = getBaseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
   const confirmationCode = `del_${Date.now()}`;
+
   res.status(200).json({
     url: `${b}/instagram/data-deletion/status?code=${encodeURIComponent(confirmationCode)}`,
     confirmation_code: confirmationCode,
@@ -221,12 +232,15 @@ app.get("/instagram/data-deletion/status", (req, res) => {
     .status(200)
     .set("Content-Type", "text/html; charset=utf-8")
     .send(`<!doctype html>
-<html><head><meta charset="utf-8"><title>Data Deletion Status</title></head>
-<body style="font-family:system-ui;padding:24px">
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Data Deletion Status</title></head>
+<body style="font-family:system-ui;padding:24px;line-height:1.6">
   <h2>Data deletion request received</h2>
   <p>Confirmation code: <b>${code || "-"}</b></p>
   <p>If you need help, contact: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>
-</body></html>`);
+</body>
+</html>`);
 });
 
 // Meta verify
@@ -259,7 +273,6 @@ app.post("/webhook", async (req, res) => {
       userId: ev.userId,
       text: ev.text,
       timestamp: ev.timestamp,
-      // raw göndərmirik, payload böyüməsin
     };
 
     const out = await forwardToN8n(payload);
@@ -267,10 +280,10 @@ app.post("/webhook", async (req, res) => {
     console.log("[meta-bot] forwarded to n8n:", {
       ok: out.ok,
       status: out.status,
-      preview: (out.json ?? out.text ?? "").toString().slice(0, 120),
+      preview: (out.json ?? out.text ?? "").toString().slice(0, 160),
     });
 
-    // Növbəti addımda: out.json.replyText varsa, Graph API ilə IG/WA-ya cavab göndərəcəyik.
+    // Sonrakı addım: out.json.replyText varsa Graph API ilə cavab göndərmək.
   } catch (err) {
     console.error("[meta-bot] Error:", err);
   }
