@@ -1,5 +1,6 @@
 // server.js — meta-bot-backend (Instagram/WhatsApp gateway -> n8n)
 // + Privacy Policy + Terms + Deauthorize + Data Deletion endpoints (Meta compliant)
+// + /__v deploy doğrulama endpointi (debug)
 
 import "dotenv/config";
 import express from "express";
@@ -16,20 +17,22 @@ if (!fetchFn) {
 }
 
 const app = express();
+
+// Meta bəzən JSON, bəzən form-urlencoded göndərə bilir:
 app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 // === ENV ===
 const PORT = Number(process.env.PORT || "8080") || 8080;
 const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "neox_verify_token").trim();
 const N8N_WEBHOOK_URL = String(process.env.N8N_WEBHOOK_URL || "").trim();
+const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS || "8000") || 8000;
 
 const CONTACT_EMAIL = String(process.env.CONTACT_EMAIL || "weneox@gmail.com").trim();
-
-// İstəsən Meta settings-lərdə yazdığın domain-i burdan sabitləyək:
 const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
 
-// Forward timeout (ms)
-const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS || "8000") || 8000;
+// Deploy yoxlama üçün:
+const BUILD_ID = String(process.env.BUILD_ID || "2026-02-27_1430").trim();
 
 // === Helpers ===
 function safeStr(x) {
@@ -129,7 +132,6 @@ async function forwardToN8n(payload) {
     return { ok: false, error: "fetch not available" };
   }
 
-  // Timeout controller
   const ac = new AbortController();
   const t = setTimeout(() => ac.abort(), N8N_TIMEOUT_MS);
 
@@ -159,12 +161,15 @@ async function forwardToN8n(payload) {
 
 // === Routes ===
 
+// Deploy doğrulama (ən vacib test)
+app.get("/__v", (req, res) => res.status(200).send(`META-BOT OK BUILD_ID=${BUILD_ID}`));
+
 // Health
-app.get("/", (req, res) => res.status(200).send("Backend is working"));
+app.get("/", (req, res) => res.status(200).send(`Backend is working (${BUILD_ID})`));
 
 /**
  * ✅ Privacy Policy URL:
- * https://meta-bot-backend-production.up.railway.app/privacy
+ * /privacy
  */
 app.get("/privacy", (req, res) => {
   const b = getBaseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
@@ -213,7 +218,7 @@ app.get("/privacy", (req, res) => {
 
 /**
  * ✅ Terms of Service URL:
- * https://meta-bot-backend-production.up.railway.app/terms
+ * /terms
  */
 app.get("/terms", (req, res) => {
   res
@@ -244,8 +249,7 @@ app.get("/terms", (req, res) => {
 
 /**
  * ✅ Deauthorize callback URL:
- * https://meta-bot-backend-production.up.railway.app/instagram/deauthorize
- *
+ * /instagram/deauthorize
  * Meta bəzən GET, bəzən POST vura bilir — ikisi də açıqdır.
  */
 app.get("/instagram/deauthorize", (req, res) => res.status(200).send("OK"));
@@ -253,8 +257,7 @@ app.post("/instagram/deauthorize", (req, res) => res.status(200).json({ ok: true
 
 /**
  * ✅ Data deletion request URL:
- * https://meta-bot-backend-production.up.railway.app/instagram/data-deletion
- *
+ * /instagram/data-deletion
  * UI validation üçün GET vura bilər.
  * Real callback üçün POST gözlənir.
  */
@@ -339,9 +342,11 @@ app.post("/webhook", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log("[meta-bot] listening on", PORT);
+  console.log("[meta-bot] BUILD_ID:", BUILD_ID);
   console.log("[meta-bot] VERIFY_TOKEN:", VERIFY_TOKEN ? "ON" : "OFF");
   console.log("[meta-bot] N8N_WEBHOOK_URL:", N8N_WEBHOOK_URL ? "ON" : "OFF");
   console.log("[meta-bot] PUBLIC_BASE_URL:", PUBLIC_BASE_URL || "(auto)");
   console.log("[meta-bot] PRIVACY:", "/privacy");
   console.log("[meta-bot] TERMS:", "/terms");
+  console.log("[meta-bot] VERSION:", "/__v");
 });
