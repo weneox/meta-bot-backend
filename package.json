@@ -1,14 +1,18 @@
 ﻿{
-    "version":  "1.0.0",
-    "name":  "meta-bot-backend",
-    "scripts":  {
-                    "start":  "node server.js"
-                },
-    "type":  "module",
-    "dependencies":  {
-                         "dotenv":  "^16.0.0",
-                         "helmet":  "^7.0.0",
-                         "express":  "^4.18.2"
-                     },
-    "main":  "server.js"
+  "name": "meta-bot-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node --watch server.js",
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "helmet": "^7.1.0"
+  }
 }
