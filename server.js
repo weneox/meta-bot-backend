@@ -1,9 +1,10 @@
-// server.js — meta-bot-backend (Instagram/WhatsApp gateway -> n8n) + Privacy/Deletion endpoints
+// server.js — meta-bot-backend (Instagram/WhatsApp gateway -> n8n)
+// + Privacy Policy + Terms + Deauthorize + Data Deletion endpoints (Meta compliant)
 
 import "dotenv/config";
 import express from "express";
 
-// Node 18+ fetch var. Node 16 olarsa fallback:
+// Node 18+ fetch var. Node 16 olarsa fallback (undici):
 let fetchFn = globalThis.fetch;
 if (!fetchFn) {
   try {
@@ -15,8 +16,6 @@ if (!fetchFn) {
 }
 
 const app = express();
-
-// Meta adətən JSON göndərir
 app.use(express.json({ limit: "2mb" }));
 
 // === ENV ===
@@ -24,29 +23,39 @@ const PORT = Number(process.env.PORT || "8080") || 8080;
 const VERIFY_TOKEN = String(process.env.VERIFY_TOKEN || "neox_verify_token").trim();
 const N8N_WEBHOOK_URL = String(process.env.N8N_WEBHOOK_URL || "").trim();
 
-// Privacy üçün kontakt email (Railway env ilə dəyişə bilərsən)
 const CONTACT_EMAIL = String(process.env.CONTACT_EMAIL || "weneox@gmail.com").trim();
+
+// İstəsən Meta settings-lərdə yazdığın domain-i burdan sabitləyək:
+const PUBLIC_BASE_URL = String(process.env.PUBLIC_BASE_URL || "").trim().replace(/\/+$/, "");
+
+// Forward timeout (ms)
+const N8N_TIMEOUT_MS = Number(process.env.N8N_TIMEOUT_MS || "8000") || 8000;
 
 // === Helpers ===
 function safeStr(x) {
   return typeof x === "string" ? x : "";
 }
 
+// Proxy arxasında düzgün baseUrl üçün:
 function getBaseUrl(req) {
+  if (PUBLIC_BASE_URL) return PUBLIC_BASE_URL;
+
   const proto = (req.headers["x-forwarded-proto"] || req.protocol || "https")
     .toString()
     .split(",")[0]
     .trim();
+
   const host = (req.headers["x-forwarded-host"] || req.headers.host || "")
     .toString()
     .split(",")[0]
     .trim();
+
   return host ? `${proto}://${host}` : "";
 }
 
 function pickFirstTextEvent(body) {
-  // Facebook Messenger/IG classic format: entry[].messaging[]
-  // Instagram Graph / WhatsApp Cloud format: entry[].changes[]
+  // entry[].messaging[] (IG classic)
+  // entry[].changes[] (WhatsApp Cloud / IG Graph)
   const items = [];
 
   if (Array.isArray(body?.entry)) {
@@ -60,7 +69,7 @@ function pickFirstTextEvent(body) {
     }
   }
 
-  // A) messaging event (IG classic)
+  // A) messaging event
   for (const ev of items) {
     const text = safeStr(ev?.message?.text);
     if (text) {
@@ -73,7 +82,7 @@ function pickFirstTextEvent(body) {
     }
   }
 
-  // B) changes event (WhatsApp/IG graph)
+  // B) changes event
   for (const ev of items) {
     const value = ev?.value;
 
@@ -84,7 +93,9 @@ function pickFirstTextEvent(body) {
         channel: "whatsapp",
         userId: safeStr(value?.contacts?.[0]?.wa_id) || safeStr(value?.messages?.[0]?.from),
         text: waText,
-        timestamp: value?.messages?.[0]?.timestamp ? Number(value.messages[0].timestamp) * 1000 : Date.now(),
+        timestamp: value?.messages?.[0]?.timestamp
+          ? Number(value.messages[0].timestamp) * 1000
+          : Date.now(),
       };
     }
 
@@ -118,29 +129,38 @@ async function forwardToN8n(payload) {
     return { ok: false, error: "fetch not available" };
   }
 
-  const r = await fetchFn(N8N_WEBHOOK_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(payload),
-  });
+  // Timeout controller
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), N8N_TIMEOUT_MS);
 
-  const text = await r.text().catch(() => "");
-  let json = null;
   try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    // n8n bəzən plain text qaytara bilər
-  }
+    const r = await fetchFn(N8N_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+      body: JSON.stringify(payload),
+      signal: ac.signal,
+    });
 
-  return { ok: r.ok, status: r.status, text, json };
+    const text = await r.text().catch(() => "");
+    let json = null;
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      // n8n plain text qaytara bilər
+    }
+
+    return { ok: r.ok, status: r.status, text, json };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  } finally {
+    clearTimeout(t);
+  }
 }
 
 // === Routes ===
 
 // Health
-app.get("/", (req, res) => {
-  res.status(200).send("Backend is working");
-});
+app.get("/", (req, res) => res.status(200).send("Backend is working"));
 
 /**
  * ✅ Privacy Policy URL:
@@ -192,31 +212,57 @@ app.get("/privacy", (req, res) => {
 });
 
 /**
+ * ✅ Terms of Service URL:
+ * https://meta-bot-backend-production.up.railway.app/terms
+ */
+app.get("/terms", (req, res) => {
+  res
+    .status(200)
+    .set("Content-Type", "text/html; charset=utf-8")
+    .send(`<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Terms of Service - NEOX Automation</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:40px auto;padding:0 16px;line-height:1.6}
+  </style>
+</head>
+<body>
+  <h1>Terms of Service</h1>
+  <p>This service processes Instagram and WhatsApp webhook events for automation purposes.</p>
+  <ul>
+    <li>You agree that messages may be processed to generate replies and trigger workflows.</li>
+    <li>We do not sell personal data.</li>
+    <li>You can request deletion of your data using the data deletion endpoint.</li>
+  </ul>
+  <p>Contact: <a href="mailto:${CONTACT_EMAIL}">${CONTACT_EMAIL}</a></p>
+</body>
+</html>`);
+});
+
+/**
  * ✅ Deauthorize callback URL:
  * https://meta-bot-backend-production.up.railway.app/instagram/deauthorize
- * (Meta bura bəzən GET, bəzən POST vura bilir — ikisini də açıq saxlayırıq)
+ *
+ * Meta bəzən GET, bəzən POST vura bilir — ikisi də açıqdır.
  */
-app.get("/instagram/deauthorize", (req, res) => {
-  res.status(200).send("OK");
-});
-app.post("/instagram/deauthorize", (req, res) => {
-  res.status(200).json({ ok: true });
-});
+app.get("/instagram/deauthorize", (req, res) => res.status(200).send("OK"));
+app.post("/instagram/deauthorize", (req, res) => res.status(200).json({ ok: true }));
 
 /**
  * ✅ Data deletion request URL:
  * https://meta-bot-backend-production.up.railway.app/instagram/data-deletion
  *
- * Meta UI validation üçün GET vura bilər.
- * Real data deletion callback üçün POST (JSON) gözlənir.
+ * UI validation üçün GET vura bilər.
+ * Real callback üçün POST gözlənir.
  */
 app.get("/instagram/data-deletion", (req, res) => {
-  // Meta validate üçün sadəcə 200 görsün
   res.status(200).send("Data deletion endpoint ready");
 });
 
 app.post("/instagram/data-deletion", (req, res) => {
-  // Meta standard cavab: "url" + "confirmation_code"
   const b = getBaseUrl(req) || "https://meta-bot-backend-production.up.railway.app";
   const confirmationCode = `del_${Date.now()}`;
 
@@ -233,8 +279,11 @@ app.get("/instagram/data-deletion/status", (req, res) => {
     .set("Content-Type", "text/html; charset=utf-8")
     .send(`<!doctype html>
 <html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Data Deletion Status</title></head>
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Data Deletion Status</title>
+</head>
 <body style="font-family:system-ui;padding:24px;line-height:1.6">
   <h2>Data deletion request received</h2>
   <p>Confirmation code: <b>${code || "-"}</b></p>
@@ -243,7 +292,7 @@ app.get("/instagram/data-deletion/status", (req, res) => {
 </html>`);
 });
 
-// Meta verify
+// Meta verify (Webhook Verification)
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
@@ -258,13 +307,11 @@ app.get("/webhook", (req, res) => {
 
 // Meta events
 app.post("/webhook", async (req, res) => {
-  // Meta retry etməsin deyə ASAP 200 veririk.
+  // Meta retry etməsin deyə ASAP 200
   res.sendStatus(200);
 
   try {
-    const body = req.body;
-
-    const ev = pickFirstTextEvent(body);
+    const ev = pickFirstTextEvent(req.body);
     if (!ev?.text) return;
 
     const payload = {
@@ -280,6 +327,7 @@ app.post("/webhook", async (req, res) => {
     console.log("[meta-bot] forwarded to n8n:", {
       ok: out.ok,
       status: out.status,
+      error: out.error,
       preview: (out.json ?? out.text ?? "").toString().slice(0, 160),
     });
 
@@ -293,5 +341,7 @@ app.listen(PORT, () => {
   console.log("[meta-bot] listening on", PORT);
   console.log("[meta-bot] VERIFY_TOKEN:", VERIFY_TOKEN ? "ON" : "OFF");
   console.log("[meta-bot] N8N_WEBHOOK_URL:", N8N_WEBHOOK_URL ? "ON" : "OFF");
+  console.log("[meta-bot] PUBLIC_BASE_URL:", PUBLIC_BASE_URL || "(auto)");
   console.log("[meta-bot] PRIVACY:", "/privacy");
+  console.log("[meta-bot] TERMS:", "/terms");
 });
