@@ -10,6 +10,14 @@ function s(v) {
   return String(v ?? "").trim();
 }
 
+function lower(v) {
+  return s(v).toLowerCase();
+}
+
+function isObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 function normalizeActions(input) {
   return Array.isArray(input) ? input : [];
 }
@@ -31,7 +39,7 @@ function failResult({ type, channel, error, status = 0, meta = null, response = 
     type: s(type || "unknown"),
     channel: s(channel || "unknown"),
     ok: false,
-    status,
+    status: Number(status || 0),
     error: s(error || "unknown error"),
     meta,
     response,
@@ -52,14 +60,52 @@ function logWarn(message, data = null) {
   } catch {}
 }
 
+function pickRecipientId(action, ctx = {}) {
+  return s(action?.recipientId) || s(ctx?.recipientId) || s(ctx?.userId);
+}
+
+function normalizeChannel(action, ctx = {}) {
+  return lower(action?.channel || ctx?.channel || "instagram") || "instagram";
+}
+
+function needsRecipient(type) {
+  return ["send_message", "mark_seen", "send_seen", "typing_on", "typing_off"].includes(type);
+}
+
+function getChannelCapabilities(channel) {
+  const ch = lower(channel);
+
+  if (ch === "instagram") {
+    return {
+      supported: true,
+      sendText: sendInstagramTextMessage,
+      sendSeen: sendInstagramSeen,
+      typingOn: sendInstagramTypingOn,
+      typingOff: sendInstagramTypingOff,
+      supportsSeen: true,
+      supportsTyping: true,
+    };
+  }
+
+  return {
+    supported: false,
+    sendText: null,
+    sendSeen: null,
+    typingOn: null,
+    typingOff: null,
+    supportsSeen: false,
+    supportsTyping: false,
+  };
+}
+
 async function ackOutboundToAiHq({ action, ctx, providerResponse }) {
-  const meta = action?.meta && typeof action.meta === "object" ? action.meta : {};
+  const meta = isObject(action?.meta) ? action.meta : {};
 
   const payload = {
     tenantKey: s(meta?.tenantKey || ctx?.tenantKey || "neox") || "neox",
-    channel: s(action?.channel || ctx?.channel || "instagram").toLowerCase() || "instagram",
+    channel: normalizeChannel(action, ctx),
     threadId: s(meta?.threadId || ctx?.threadId || ""),
-    recipientId: s(action?.recipientId || ctx?.recipientId || ctx?.userId || ""),
+    recipientId: pickRecipientId(action, ctx),
     text: s(action?.text || ""),
     direction: "outbound",
     senderType: "ai",
@@ -87,25 +133,181 @@ async function ackOutboundToAiHq({ action, ctx, providerResponse }) {
   return notifyAiHqOutbound(payload);
 }
 
+async function runSendMessage({ action, ctx, channel, recipientId, meta, sender }) {
+  const text = s(action?.text);
+  if (!text) {
+    return failResult({
+      type: "send_message",
+      channel,
+      error: "text missing",
+      meta,
+    });
+  }
+
+  const out = await sender({
+    recipientId,
+    text,
+  });
+
+  let outboundAck = null;
+
+  if (out.ok) {
+    outboundAck = await ackOutboundToAiHq({
+      action,
+      ctx,
+      providerResponse: out.json || null,
+    });
+
+    if (outboundAck?.ok) {
+      logInfo("outbound ack synced to AI HQ", {
+        threadId: s(meta?.threadId || ctx?.threadId || ""),
+        providerMessageId: s(
+          out?.json?.message_id || out?.json?.messageId || out?.json?.id || ""
+        ),
+      });
+    } else {
+      logWarn("outbound ack failed after successful send_message", {
+        threadId: s(meta?.threadId || ctx?.threadId || ""),
+        recipientId,
+        error: s(outboundAck?.error || "unknown outbound ack error"),
+        status: Number(outboundAck?.status || 0),
+      });
+    }
+  } else {
+    logWarn("send_message failed", {
+      threadId: s(meta?.threadId || ctx?.threadId || ""),
+      recipientId,
+      error: s(out?.error || "unknown send error"),
+      status: Number(out?.status || 0),
+    });
+  }
+
+  return {
+    type: "send_message",
+    channel,
+    ok: Boolean(out.ok),
+    status: Number(out.status || 0),
+    error: out.error || null,
+    meta: {
+      ...(meta || {}),
+      outboundAck: outboundAck || null,
+    },
+    response: out.json || null,
+  };
+}
+
+async function runSeen({ type, channel, recipientId, meta, sender }) {
+  const out = await sender({ recipientId });
+
+  if (!out.ok) {
+    logWarn("mark_seen failed", {
+      recipientId,
+      error: s(out?.error || "unknown mark_seen error"),
+      status: Number(out?.status || 0),
+    });
+  }
+
+  return {
+    type,
+    channel,
+    ok: Boolean(out.ok),
+    status: Number(out.status || 0),
+    error: out.error || null,
+    meta,
+    response: out.json || null,
+  };
+}
+
+async function runTyping({ type, channel, recipientId, meta, sender, logLabel }) {
+  const out = await sender({ recipientId });
+
+  if (!out.ok) {
+    logWarn(`${logLabel} failed`, {
+      recipientId,
+      error: s(out?.error || `unknown ${logLabel} error`),
+      status: Number(out?.status || 0),
+    });
+  }
+
+  return {
+    type,
+    channel,
+    ok: Boolean(out.ok),
+    status: Number(out.status || 0),
+    error: out.error || null,
+    meta,
+    response: out.json || null,
+  };
+}
+
+function buildPassiveSuccess(type, channel, action, meta) {
+  if (type === "create_lead") {
+    return okResult({
+      type,
+      channel,
+      meta: {
+        ...(meta || {}),
+        lead: action?.lead || null,
+        note: "lead already persisted in AI HQ",
+      },
+    });
+  }
+
+  if (type === "handoff") {
+    return okResult({
+      type,
+      channel,
+      meta: {
+        ...(meta || {}),
+        reason: s(action?.reason || "manual_review"),
+        priority: s(action?.priority || "normal"),
+        note: "handoff already persisted in AI HQ",
+      },
+    });
+  }
+
+  if (type === "no_reply") {
+    return okResult({
+      type,
+      channel,
+      meta: {
+        ...(meta || {}),
+        reason: s(action?.reason || "rule_suppressed"),
+      },
+    });
+  }
+
+  return null;
+}
+
 export async function executeMetaActions(actions, ctx = {}) {
   const list = normalizeActions(actions);
   const results = [];
 
   for (const action of list) {
-    const type = s(action?.type).toLowerCase();
-    const channel = s(action?.channel || ctx.channel || "instagram").toLowerCase();
-    const meta = action?.meta && typeof action.meta === "object" ? action.meta : null;
+    const type = lower(action?.type);
+    const channel = normalizeChannel(action, ctx);
+    const meta = isObject(action?.meta) ? action.meta : null;
+    const recipientId = pickRecipientId(action, ctx);
+    const caps = getChannelCapabilities(channel);
 
-    const recipientId =
-      s(action?.recipientId) ||
-      s(ctx.recipientId) ||
-      s(ctx.userId);
-
-    if (channel !== "instagram") {
+    if (!type) {
       results.push(
         failResult({
-          type: type || "unknown",
-          channel: channel || "unknown",
+          type: "unknown",
+          channel,
+          error: "action type missing",
+          meta,
+        })
+      );
+      continue;
+    }
+
+    if (!caps.supported) {
+      results.push(
+        failResult({
+          type,
+          channel,
           error: "unsupported channel",
           meta,
         })
@@ -113,7 +315,7 @@ export async function executeMetaActions(actions, ctx = {}) {
       continue;
     }
 
-    if (!recipientId && ["send_message", "mark_seen", "send_seen", "typing_on", "typing_off"].includes(type)) {
+    if (needsRecipient(type) && !recipientId) {
       results.push(
         failResult({
           type,
@@ -126,184 +328,99 @@ export async function executeMetaActions(actions, ctx = {}) {
     }
 
     if (type === "send_message") {
-      const text = s(action?.text);
+      results.push(
+        await runSendMessage({
+          action,
+          ctx,
+          channel,
+          recipientId,
+          meta,
+          sender: caps.sendText,
+        })
+      );
+      continue;
+    }
 
-      if (!text) {
+    if (type === "mark_seen" || type === "send_seen") {
+      if (!caps.supportsSeen || !caps.sendSeen) {
         results.push(
           failResult({
             type,
             channel,
-            error: "text missing",
+            error: "seen action not supported for channel",
             meta,
           })
         );
         continue;
       }
 
-      const out = await sendInstagramTextMessage({
-        recipientId,
-        text,
-      });
-
-      let outboundAck = null;
-
-      if (out.ok) {
-        outboundAck = await ackOutboundToAiHq({
-          action,
-          ctx,
-          providerResponse: out.json || null,
-        });
-
-        if (outboundAck?.ok) {
-          logInfo("outbound ack synced to AI HQ", {
-            threadId: s(meta?.threadId || ctx?.threadId || ""),
-            providerMessageId: s(
-              out?.json?.message_id || out?.json?.messageId || out?.json?.id || ""
-            ),
-          });
-        } else {
-          logWarn("outbound ack failed after successful send_message", {
-            threadId: s(meta?.threadId || ctx?.threadId || ""),
-            recipientId,
-            error: s(outboundAck?.error || "unknown outbound ack error"),
-            status: Number(outboundAck?.status || 0),
-          });
-        }
-      } else {
-        logWarn("send_message failed", {
-          threadId: s(meta?.threadId || ctx?.threadId || ""),
+      results.push(
+        await runSeen({
+          type,
+          channel,
           recipientId,
-          error: s(out?.error || "unknown send error"),
-          status: Number(out?.status || 0),
-        });
-      }
-
-      results.push({
-        type,
-        channel,
-        ok: out.ok,
-        status: out.status,
-        error: out.error || null,
-        meta: {
-          ...(meta || {}),
-          outboundAck: outboundAck || null,
-        },
-        response: out.json || null,
-      });
-      continue;
-    }
-
-    if (type === "mark_seen" || type === "send_seen") {
-      const out = await sendInstagramSeen({ recipientId });
-
-      if (!out.ok) {
-        logWarn("mark_seen failed", {
-          recipientId,
-          error: s(out?.error || "unknown mark_seen error"),
-          status: Number(out?.status || 0),
-        });
-      }
-
-      results.push({
-        type,
-        channel,
-        ok: out.ok,
-        status: out.status,
-        error: out.error || null,
-        meta,
-        response: out.json || null,
-      });
+          meta,
+          sender: caps.sendSeen,
+        })
+      );
       continue;
     }
 
     if (type === "typing_on") {
-      const out = await sendInstagramTypingOn({ recipientId });
-
-      if (!out.ok) {
-        logWarn("typing_on failed", {
-          recipientId,
-          error: s(out?.error || "unknown typing_on error"),
-          status: Number(out?.status || 0),
-        });
+      if (!caps.supportsTyping || !caps.typingOn) {
+        results.push(
+          failResult({
+            type,
+            channel,
+            error: "typing_on not supported for channel",
+            meta,
+          })
+        );
+        continue;
       }
 
-      results.push({
-        type,
-        channel,
-        ok: out.ok,
-        status: out.status,
-        error: out.error || null,
-        meta,
-        response: out.json || null,
-      });
+      results.push(
+        await runTyping({
+          type,
+          channel,
+          recipientId,
+          meta,
+          sender: caps.typingOn,
+          logLabel: "typing_on",
+        })
+      );
       continue;
     }
 
     if (type === "typing_off") {
-      const out = await sendInstagramTypingOff({ recipientId });
-
-      if (!out.ok) {
-        logWarn("typing_off failed", {
-          recipientId,
-          error: s(out?.error || "unknown typing_off error"),
-          status: Number(out?.status || 0),
-        });
+      if (!caps.supportsTyping || !caps.typingOff) {
+        results.push(
+          failResult({
+            type,
+            channel,
+            error: "typing_off not supported for channel",
+            meta,
+          })
+        );
+        continue;
       }
 
-      results.push({
-        type,
-        channel,
-        ok: out.ok,
-        status: out.status,
-        error: out.error || null,
-        meta,
-        response: out.json || null,
-      });
-      continue;
-    }
-
-    if (type === "create_lead") {
       results.push(
-        okResult({
+        await runTyping({
           type,
           channel,
-          meta: {
-            ...(meta || {}),
-            lead: action?.lead || null,
-            note: "lead already persisted in AI HQ",
-          },
+          recipientId,
+          meta,
+          sender: caps.typingOff,
+          logLabel: "typing_off",
         })
       );
       continue;
     }
 
-    if (type === "handoff") {
-      results.push(
-        okResult({
-          type,
-          channel,
-          meta: {
-            ...(meta || {}),
-            reason: s(action?.reason || "manual_review"),
-            priority: s(action?.priority || "normal"),
-            note: "handoff already persisted in AI HQ",
-          },
-        })
-      );
-      continue;
-    }
-
-    if (type === "no_reply") {
-      results.push(
-        okResult({
-          type,
-          channel,
-          meta: {
-            ...(meta || {}),
-            reason: s(action?.reason || "rule_suppressed"),
-          },
-        })
-      );
+    const passive = buildPassiveSuccess(type, channel, action, meta);
+    if (passive) {
+      results.push(passive);
       continue;
     }
 

@@ -1,10 +1,31 @@
 import { VERIFY_TOKEN } from "../config.js";
-import { pickFirstTextEvent } from "../utils/metaParser.js";
+import { extractMetaEvents } from "../utils/metaParser.js";
 import { forwardToAiHq } from "../services/aihqClient.js";
 import { executeMetaActions } from "../services/actionExecutor.js";
 
 function s(v) {
   return String(v ?? "").trim();
+}
+
+function logInfo(message, data = null) {
+  try {
+    if (data) console.log(`[meta-bot] ${message}`, data);
+    else console.log(`[meta-bot] ${message}`);
+  } catch {}
+}
+
+function logWarn(message, data = null) {
+  try {
+    if (data) console.warn(`[meta-bot] ${message}`, data);
+    else console.warn(`[meta-bot] ${message}`);
+  } catch {}
+}
+
+function logError(message, data = null) {
+  try {
+    if (data) console.error(`[meta-bot] ${message}`, data);
+    else console.error(`[meta-bot] ${message}`);
+  } catch {}
 }
 
 function summarizeExec(exec) {
@@ -31,6 +52,100 @@ function summarizeExec(exec) {
   };
 }
 
+function buildAihqPayload(ev, rawBody) {
+  const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
+  const externalUserId = s(ev?.userId || "");
+  const externalMessageId = s(ev?.messageId || ev?.mid || "");
+  const externalThreadId = s(ev?.externalThreadId || externalUserId || "");
+  const text = s(ev?.text || "");
+
+  return {
+    tenantKey: "neox",
+    source: "meta",
+    platform: channel,
+    channel,
+    userId: externalUserId,
+    externalUserId,
+    externalThreadId,
+    externalMessageId,
+    externalUsername: s(ev?.username || ""),
+    customerName: s(ev?.customerName || ""),
+    text,
+    timestamp: Number(ev?.timestamp || Date.now()),
+    raw: rawBody,
+  };
+}
+
+function summarizeInbound(ev) {
+  return {
+    channel: s(ev?.channel || "unknown"),
+    eventType: s(ev?.eventType || "unknown"),
+    userId: s(ev?.userId || ""),
+    recipientId: s(ev?.recipientId || ""),
+    externalThreadId: s(ev?.externalThreadId || ""),
+    externalMessageId: s(ev?.messageId || ev?.mid || ""),
+    textPreview: s(ev?.text || "").slice(0, 160),
+    hasAttachments: Boolean(ev?.hasAttachments),
+    ignored: Boolean(ev?.ignored),
+    ignoreReason: s(ev?.ignoreReason || ""),
+    supported: Boolean(ev?.supported),
+  };
+}
+
+async function handleSupportedEvent(ev, rawBody) {
+  const payload = buildAihqPayload(ev, rawBody);
+
+  logInfo("inbound event", summarizeInbound(ev));
+
+  const out = await forwardToAiHq(payload);
+
+  logInfo("forwarded to AI HQ", {
+    ok: out.ok,
+    status: out.status,
+    error: out.error,
+    duplicate: Boolean(out?.json?.duplicate),
+    deduped: Boolean(out?.json?.deduped),
+    intent: s(out?.json?.intent || ""),
+    leadScore: Number(out?.json?.leadScore || 0),
+    actionsCount: Array.isArray(out?.json?.actions) ? out.json.actions.length : 0,
+    threadId: s(out?.json?.thread?.id || ""),
+    preview: JSON.stringify(out?.json || {}).slice(0, 220),
+  });
+
+  if (!out.ok) {
+    logWarn("AI HQ returned failure", {
+      channel: s(ev?.channel || ""),
+      userId: s(ev?.userId || ""),
+      externalMessageId: s(ev?.messageId || ev?.mid || ""),
+      error: s(out?.error || ""),
+      status: Number(out?.status || 0),
+    });
+    return;
+  }
+
+  const actions = Array.isArray(out?.json?.actions) ? out.json.actions : [];
+
+  if (!actions.length) {
+    logInfo("no actions returned from AI HQ", {
+      duplicate: Boolean(out?.json?.duplicate),
+      deduped: Boolean(out?.json?.deduped),
+      intent: s(out?.json?.intent || ""),
+      threadId: s(out?.json?.thread?.id || ""),
+    });
+    return;
+  }
+
+  const exec = await executeMetaActions(actions, {
+    channel: s(ev?.channel || "instagram").toLowerCase() || "instagram",
+    userId: s(ev?.userId || ""),
+    recipientId: s(ev?.userId || ""),
+    tenantKey: s(out?.json?.tenant?.tenant_key || "neox"),
+    threadId: s(out?.json?.thread?.id || ""),
+  });
+
+  logInfo("action execution summary", summarizeExec(exec));
+}
+
 export function registerWebhookRoutes(app) {
   app.get("/webhook", (req, res) => {
     const mode = req.query["hub.mode"];
@@ -38,7 +153,7 @@ export function registerWebhookRoutes(app) {
     const challenge = req.query["hub.challenge"];
 
     if (mode === "subscribe" && token === VERIFY_TOKEN) {
-      console.log("[meta-bot] Webhook verified");
+      logInfo("Webhook verified");
       return res.status(200).send(String(challenge || ""));
     }
 
@@ -49,84 +164,55 @@ export function registerWebhookRoutes(app) {
     res.sendStatus(200);
 
     try {
-      const ev = pickFirstTextEvent(req.body);
+      const events = extractMetaEvents(req.body);
 
-      if (!ev?.text) {
-        console.log("[meta-bot] ignored event: no text");
+      if (!events.length) {
+        logInfo("ignored webhook: no parsable events");
         return;
       }
 
-      const channel = s(ev.channel || "instagram").toLowerCase() || "instagram";
-      const externalUserId = s(ev.userId || "");
-      const externalMessageId = s(ev.messageId || ev.mid || "");
+      for (const ev of events) {
+        const supported = Boolean(ev?.supported);
+        const ignored = Boolean(ev?.ignored);
+        const userId = s(ev?.userId || "");
+        const text = s(ev?.text || "");
+        const eventType = s(ev?.eventType || "unknown");
 
-      if (!externalUserId) {
-        console.log("[meta-bot] ignored event: missing userId");
-        return;
+        if (ignored || !supported) {
+          logInfo("ignored event", {
+            eventType,
+            channel: s(ev?.channel || "unknown"),
+            userId,
+            reason: s(ev?.ignoreReason || "unsupported"),
+          });
+          continue;
+        }
+
+        if (eventType !== "text") {
+          logInfo("ignored non-text supported event", {
+            eventType,
+            channel: s(ev?.channel || "unknown"),
+            userId,
+          });
+          continue;
+        }
+
+        if (!userId) {
+          logWarn("ignored event: missing userId", summarizeInbound(ev));
+          continue;
+        }
+
+        if (!text) {
+          logInfo("ignored event: empty text", summarizeInbound(ev));
+          continue;
+        }
+
+        await handleSupportedEvent(ev, req.body);
       }
-
-      const payload = {
-        tenantKey: "neox",
-        source: "meta",
-        platform: channel,
-        channel,
-        userId: externalUserId,
-        externalUserId,
-        externalThreadId: externalUserId,
-        externalMessageId,
-        externalUsername: s(ev.username || ""),
-        customerName: s(ev.customerName || ""),
-        text: s(ev.text),
-        timestamp: ev.timestamp || Date.now(),
-        raw: req.body,
-      };
-
-      console.log("[meta-bot] inbound event:", {
-        channel,
-        userId: externalUserId,
-        externalMessageId,
-        textPreview: s(ev.text).slice(0, 160),
-      });
-
-      const out = await forwardToAiHq(payload);
-
-      console.log("[meta-bot] forwarded to AI HQ:", {
-        ok: out.ok,
-        status: out.status,
-        error: out.error,
-        duplicate: Boolean(out?.json?.duplicate),
-        deduped: Boolean(out?.json?.deduped),
-        intent: s(out?.json?.intent || ""),
-        leadScore: Number(out?.json?.leadScore || 0),
-        actionsCount: Array.isArray(out?.json?.actions) ? out.json.actions.length : 0,
-        threadId: s(out?.json?.thread?.id || ""),
-        preview: JSON.stringify(out.json || {}).slice(0, 220),
-      });
-
-      if (!out.ok) return;
-
-      const actions = Array.isArray(out?.json?.actions) ? out.json.actions : [];
-
-      if (!actions.length) {
-        console.log("[meta-bot] no actions returned from AI HQ", {
-          duplicate: Boolean(out?.json?.duplicate),
-          deduped: Boolean(out?.json?.deduped),
-          intent: s(out?.json?.intent || ""),
-        });
-        return;
-      }
-
-      const exec = await executeMetaActions(actions, {
-        channel,
-        userId: externalUserId,
-        recipientId: externalUserId,
-        tenantKey: s(out?.json?.tenant?.tenant_key || "neox"),
-        threadId: s(out?.json?.thread?.id || ""),
-      });
-
-      console.log("[meta-bot] action execution summary:", summarizeExec(exec));
     } catch (err) {
-      console.error("[meta-bot] Error:", err);
+      logError("Error", {
+        message: s(err?.message || err),
+      });
     }
   });
 }
