@@ -1,6 +1,9 @@
 import { VERIFY_TOKEN } from "../config.js";
 import { extractMetaEvents } from "../utils/metaParser.js";
-import { forwardToAiHq } from "../services/aihqClient.js";
+import {
+  forwardToAiHq,
+  forwardCommentToAiHq,
+} from "../services/aihqClient.js";
 import { executeMetaActions } from "../services/actionExecutor.js";
 
 function s(v) {
@@ -52,7 +55,7 @@ function summarizeExec(exec) {
   };
 }
 
-function buildAihqPayload(ev, rawBody) {
+function buildAihqInboxPayload(ev, rawBody) {
   const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
   const externalUserId = s(ev?.userId || "");
   const externalMessageId = s(ev?.messageId || ev?.mid || "");
@@ -76,6 +79,30 @@ function buildAihqPayload(ev, rawBody) {
   };
 }
 
+function buildAihqCommentPayload(ev, rawBody) {
+  const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
+
+  return {
+    tenantKey: "neox",
+    source: "meta",
+    platform: channel,
+    channel,
+    eventType: "comment",
+
+    externalCommentId: s(ev?.externalCommentId || ev?.messageId || ev?.mid || ""),
+    externalParentCommentId: s(ev?.externalParentCommentId || ""),
+    externalPostId: s(ev?.externalPostId || ""),
+
+    externalUserId: s(ev?.userId || ""),
+    externalUsername: s(ev?.username || ""),
+    customerName: s(ev?.customerName || ""),
+
+    text: s(ev?.text || ""),
+    timestamp: Number(ev?.timestamp || Date.now()),
+    raw: rawBody,
+  };
+}
+
 function summarizeInbound(ev) {
   return {
     channel: s(ev?.channel || "unknown"),
@@ -84,6 +111,8 @@ function summarizeInbound(ev) {
     recipientId: s(ev?.recipientId || ""),
     externalThreadId: s(ev?.externalThreadId || ""),
     externalMessageId: s(ev?.messageId || ev?.mid || ""),
+    externalCommentId: s(ev?.externalCommentId || ""),
+    externalPostId: s(ev?.externalPostId || ""),
     textPreview: s(ev?.text || "").slice(0, 160),
     hasAttachments: Boolean(ev?.hasAttachments),
     ignored: Boolean(ev?.ignored),
@@ -92,14 +121,14 @@ function summarizeInbound(ev) {
   };
 }
 
-async function handleSupportedEvent(ev, rawBody) {
-  const payload = buildAihqPayload(ev, rawBody);
+async function handleSupportedTextEvent(ev, rawBody) {
+  const payload = buildAihqInboxPayload(ev, rawBody);
 
-  logInfo("inbound event", summarizeInbound(ev));
+  logInfo("inbound text event", summarizeInbound(ev));
 
   const out = await forwardToAiHq(payload);
 
-  logInfo("forwarded to AI HQ", {
+  logInfo("forwarded text to AI HQ", {
     ok: out.ok,
     status: out.status,
     error: out.error,
@@ -113,7 +142,7 @@ async function handleSupportedEvent(ev, rawBody) {
   });
 
   if (!out.ok) {
-    logWarn("AI HQ returned failure", {
+    logWarn("AI HQ returned failure for text", {
       channel: s(ev?.channel || ""),
       userId: s(ev?.userId || ""),
       externalMessageId: s(ev?.messageId || ev?.mid || ""),
@@ -126,7 +155,7 @@ async function handleSupportedEvent(ev, rawBody) {
   const actions = Array.isArray(out?.json?.actions) ? out.json.actions : [];
 
   if (!actions.length) {
-    logInfo("no actions returned from AI HQ", {
+    logInfo("no actions returned from AI HQ for text", {
       duplicate: Boolean(out?.json?.duplicate),
       deduped: Boolean(out?.json?.deduped),
       intent: s(out?.json?.intent || ""),
@@ -143,7 +172,37 @@ async function handleSupportedEvent(ev, rawBody) {
     threadId: s(out?.json?.thread?.id || ""),
   });
 
-  logInfo("action execution summary", summarizeExec(exec));
+  logInfo("text action execution summary", summarizeExec(exec));
+}
+
+async function handleSupportedCommentEvent(ev, rawBody) {
+  const payload = buildAihqCommentPayload(ev, rawBody);
+
+  logInfo("inbound comment event", summarizeInbound(ev));
+
+  const out = await forwardCommentToAiHq(payload);
+
+  logInfo("forwarded comment to AI HQ", {
+    ok: out.ok,
+    status: out.status,
+    error: out.error,
+    classification: s(out?.json?.classification?.category || ""),
+    priority: s(out?.json?.classification?.priority || ""),
+    requiresHuman: Boolean(out?.json?.classification?.requiresHuman),
+    shouldCreateLead: Boolean(out?.json?.classification?.shouldCreateLead),
+    commentId: s(out?.json?.comment?.id || ""),
+    preview: JSON.stringify(out?.json || {}).slice(0, 220),
+  });
+
+  if (!out.ok) {
+    logWarn("AI HQ returned failure for comment", {
+      channel: s(ev?.channel || ""),
+      userId: s(ev?.userId || ""),
+      externalCommentId: s(ev?.externalCommentId || ""),
+      error: s(out?.error || ""),
+      status: Number(out?.status || 0),
+    });
+  }
 }
 
 export function registerWebhookRoutes(app) {
@@ -188,26 +247,41 @@ export function registerWebhookRoutes(app) {
           continue;
         }
 
-        if (eventType !== "text") {
-          logInfo("ignored non-text supported event", {
-            eventType,
-            channel: s(ev?.channel || "unknown"),
-            userId,
-          });
+        if (eventType === "text") {
+          if (!userId) {
+            logWarn("ignored text event: missing userId", summarizeInbound(ev));
+            continue;
+          }
+
+          if (!text) {
+            logInfo("ignored text event: empty text", summarizeInbound(ev));
+            continue;
+          }
+
+          await handleSupportedTextEvent(ev, req.body);
           continue;
         }
 
-        if (!userId) {
-          logWarn("ignored event: missing userId", summarizeInbound(ev));
+        if (eventType === "comment") {
+          if (!s(ev?.externalCommentId || "")) {
+            logWarn("ignored comment event: missing comment id", summarizeInbound(ev));
+            continue;
+          }
+
+          if (!text) {
+            logInfo("ignored comment event: empty text", summarizeInbound(ev));
+            continue;
+          }
+
+          await handleSupportedCommentEvent(ev, req.body);
           continue;
         }
 
-        if (!text) {
-          logInfo("ignored event: empty text", summarizeInbound(ev));
-          continue;
-        }
-
-        await handleSupportedEvent(ev, req.body);
+        logInfo("ignored supported non-handled event", {
+          eventType,
+          channel: s(ev?.channel || "unknown"),
+          userId,
+        });
       }
     } catch (err) {
       logError("Error", {

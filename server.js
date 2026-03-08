@@ -4,6 +4,7 @@ import express from "express";
 import { PORT } from "./src/config.js";
 import { registerPublicPages } from "./src/routes/publicPages.js";
 import { registerWebhookRoutes } from "./src/routes/webhook.js";
+import { internalOutboundRoutes } from "./src/routes/internal.outbound.js";
 
 const app = express();
 
@@ -24,6 +25,7 @@ app.get("/health", (req, res) => {
 
 registerPublicPages(app);
 registerWebhookRoutes(app);
+app.use(internalOutboundRoutes());
 
 app.use((req, res) => {
   res.status(404).json({
@@ -53,4 +55,5 @@ app.listen(PORT, () => {
   console.log("[meta-bot] PRIVACY:", "/privacy");
   console.log("[meta-bot] TERMS:", "/terms");
   console.log("[meta-bot] WEBHOOK:", "/webhook");
+  console.log("[meta-bot] INTERNAL OUTBOUND:", "/internal/outbound/send");
 });

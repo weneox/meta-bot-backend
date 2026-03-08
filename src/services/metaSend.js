@@ -31,12 +31,22 @@ async function safeReadJson(res) {
   }
 }
 
-function metaEndpoint() {
+function graphBase() {
   const version = s(META_API_VERSION || "v23.0") || "v23.0";
-  return `https://graph.facebook.com/${version}/me/messages`;
+  return `https://graph.facebook.com/${version}`;
 }
 
-async function postToMeta(body) {
+function metaMessagesEndpoint() {
+  return `${graphBase()}/me/messages`;
+}
+
+function graphNodeEndpoint(nodeId, edge = "") {
+  const id = encodeURIComponent(s(nodeId));
+  const cleanEdge = s(edge).replace(/^\/+/, "");
+  return cleanEdge ? `${graphBase()}/${id}/${cleanEdge}` : `${graphBase()}/${id}`;
+}
+
+async function postJson(url, body) {
   const token = s(META_PAGE_ACCESS_TOKEN);
   if (!token) {
     return fail("META_PAGE_ACCESS_TOKEN missing");
@@ -46,7 +56,7 @@ async function postToMeta(body) {
   const timer = setTimeout(() => controller.abort(), META_REPLY_TIMEOUT_MS);
 
   try {
-    const res = await fetch(metaEndpoint(), {
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -76,10 +86,61 @@ async function postToMeta(body) {
   }
 }
 
+async function postForm(url, params) {
+  const token = s(META_PAGE_ACCESS_TOKEN);
+  if (!token) {
+    return fail("META_PAGE_ACCESS_TOKEN missing");
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), META_REPLY_TIMEOUT_MS);
+
+  try {
+    const body = new URLSearchParams();
+    for (const [k, v] of Object.entries(params || {})) {
+      if (v == null) continue;
+      body.set(k, String(v));
+    }
+
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      body,
+      signal: controller.signal,
+    });
+
+    const json = await safeReadJson(res);
+
+    return {
+      ok: res.ok,
+      status: res.status,
+      json,
+      error: res.ok
+        ? null
+        : json?.error?.message || json?.message || "Meta request failed",
+    };
+  } catch (err) {
+    return fail(
+      err?.name === "AbortError" ? "Meta timeout" : String(err?.message || err)
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function requireRecipient(recipientId) {
   const to = s(recipientId);
   if (!to) return { ok: false, error: "recipientId missing" };
   return { ok: true, value: to };
+}
+
+function requireCommentId(commentId) {
+  const id = s(commentId);
+  if (!id) return { ok: false, error: "commentId missing" };
+  return { ok: true, value: id };
 }
 
 function buildRecipient(recipientId) {
@@ -93,7 +154,7 @@ async function sendText({ recipientId, text, messagingType = "RESPONSE" }) {
   const bodyText = s(text);
   if (!bodyText) return fail("text missing");
 
-  return postToMeta({
+  return postJson(metaMessagesEndpoint(), {
     recipient: buildRecipient(recipient.value),
     messaging_type: s(messagingType || "RESPONSE") || "RESPONSE",
     message: { text: bodyText },
@@ -107,7 +168,7 @@ async function sendSenderAction({ recipientId, action }) {
   const senderAction = lower(action);
   if (!senderAction) return fail("sender action missing");
 
-  return postToMeta({
+  return postJson(metaMessagesEndpoint(), {
     recipient: buildRecipient(recipient.value),
     sender_action: senderAction,
   });
@@ -139,5 +200,37 @@ export async function sendInstagramTypingOff({ recipientId }) {
   return sendSenderAction({
     recipientId,
     action: "typing_off",
+  });
+}
+
+/**
+ * Instagram public comment reply
+ * Docs indicate replies are created on /{ig-comment-id}/replies with a message param.
+ */
+export async function sendInstagramCommentReply({ commentId, text }) {
+  const comment = requireCommentId(commentId);
+  if (!comment.ok) return fail(comment.error);
+
+  const bodyText = s(text);
+  if (!bodyText) return fail("text missing");
+
+  return postForm(graphNodeEndpoint(comment.value, "replies"), {
+    message: bodyText,
+  });
+}
+
+/**
+ * Facebook Page public comment reply
+ * Reply is created by posting a comment on the parent comment via /{comment-id}/comments.
+ */
+export async function sendFacebookCommentReply({ commentId, text }) {
+  const comment = requireCommentId(commentId);
+  if (!comment.ok) return fail(comment.error);
+
+  const bodyText = s(text);
+  if (!bodyText) return fail("text missing");
+
+  return postForm(graphNodeEndpoint(comment.value, "comments"), {
+    message: bodyText,
   });
 }

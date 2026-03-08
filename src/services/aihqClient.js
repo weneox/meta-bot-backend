@@ -14,7 +14,7 @@ async function safeReadJson(res) {
   }
 }
 
-export async function forwardToAiHq(payload) {
+async function postToAiHq(path, payload) {
   const base = trimSlash(AIHQ_BASE_URL);
 
   if (!base) {
@@ -29,7 +29,7 @@ export async function forwardToAiHq(payload) {
   const timer = setTimeout(() => controller.abort(), AIHQ_TIMEOUT_MS);
 
   try {
-    const res = await fetch(`${base}/api/inbox/ingest`, {
+    const res = await fetch(`${base}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json; charset=utf-8",
@@ -57,4 +57,12 @@ export async function forwardToAiHq(payload) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+export async function forwardToAiHq(payload) {
+  return postToAiHq("/api/inbox/ingest", payload);
+}
+
+export async function forwardCommentToAiHq(payload) {
+  return postToAiHq("/api/comments/ingest", payload);
 }

@@ -29,6 +29,32 @@ function hasText(v) {
   return cleanText(v).length > 0;
 }
 
+function normalizeTimestamp(v, fallback = Date.now()) {
+  if (v == null || v === "") return fallback;
+
+  if (typeof v === "number" && Number.isFinite(v)) {
+    if (v > 1e12) return v;
+    if (v > 1e9) return v * 1000;
+    return fallback;
+  }
+
+  const raw = String(v).trim();
+  if (!raw) return fallback;
+
+  if (/^\d+$/.test(raw)) {
+    const n = Number(raw);
+    if (Number.isFinite(n)) {
+      if (n > 1e12) return n;
+      if (n > 1e9) return n * 1000;
+    }
+  }
+
+  const parsed = Date.parse(raw);
+  if (Number.isFinite(parsed)) return parsed;
+
+  return fallback;
+}
+
 function inferChannelFromMessaging(ev = {}) {
   const platform = lower(ev?.platform);
   if (platform.includes("instagram")) return "instagram";
@@ -47,6 +73,9 @@ function inferChannelFromChange(change = {}) {
 
   if (field.includes("instagram")) return "instagram";
   if (field.includes("messenger")) return "facebook";
+  if (field.includes("comments")) return "instagram";
+  if (field.includes("comment")) return "instagram";
+  if (field.includes("feed")) return "instagram";
 
   if (value?.instagram_id || value?.user_id || value?.thread_id) return "instagram";
   return "instagram";
@@ -65,6 +94,9 @@ function baseEvent({
   externalThreadId = "",
   username = "",
   customerName = "",
+  externalCommentId = "",
+  externalParentCommentId = "",
+  externalPostId = "",
   raw = null,
   supported = false,
   ignored = false,
@@ -83,12 +115,17 @@ function baseEvent({
     userId: uid,
     recipientId: rid,
     text: cleanText(text),
-    timestamp: toNum(timestamp, Date.now()) || Date.now(),
+    timestamp: normalizeTimestamp(timestamp, Date.now()),
     messageId: msgId,
     mid: s(mid || messageId || ""),
     externalThreadId: s(externalThreadId || uid || ""),
     username: s(username),
     customerName: s(customerName),
+
+    externalCommentId: s(externalCommentId),
+    externalParentCommentId: s(externalParentCommentId),
+    externalPostId: s(externalPostId),
+
     raw,
     supported: Boolean(supported),
     ignored: Boolean(ignored),
@@ -145,7 +182,7 @@ function parseMessagingItem(ev = {}) {
   const channel = inferChannelFromMessaging(ev);
   const senderId = s(ev?.sender?.id);
   const recipientId = s(ev?.recipient?.id);
-  const timestamp = toNum(ev?.timestamp, Date.now());
+  const timestamp = normalizeTimestamp(ev?.timestamp, Date.now());
   const message = ev?.message || {};
   const text = cleanText(message?.text);
   const messageId = s(message?.mid || message?.id || "");
@@ -270,7 +307,7 @@ function parseWhatsAppChange(change = {}) {
   const value = change?.value || {};
   const msg = value?.messages?.[0] || {};
   const text = cleanText(msg?.text?.body);
-  const timestamp = msg?.timestamp ? toNum(msg.timestamp, 0) * 1000 : Date.now();
+  const timestamp = normalizeTimestamp(msg?.timestamp, Date.now());
   const messageId = s(msg?.id || "");
   const userId = s(value?.contacts?.[0]?.wa_id) || s(msg?.from);
   const recipientId = s(value?.metadata?.display_phone_number || "");
@@ -347,7 +384,7 @@ function parseWhatsAppChange(change = {}) {
   });
 }
 
-function parseInstagramLikeChange(change = {}) {
+function parseInstagramLikeMessageChange(change = {}) {
   const value = change?.value || {};
   const msg0 = value?.messages?.[0] || {};
   const fromObj = value?.from || {};
@@ -362,8 +399,8 @@ function parseInstagramLikeChange(change = {}) {
     cleanText(msg0?.message?.text);
 
   const timestamp =
-    toNum(msg0?.created_time, 0) ||
-    toNum(value?.timestamp, 0) ||
+    normalizeTimestamp(msg0?.created_time, 0) ||
+    normalizeTimestamp(value?.timestamp, 0) ||
     Date.now();
 
   const messageId =
@@ -440,10 +477,162 @@ function parseInstagramLikeChange(change = {}) {
   });
 }
 
+function looksLikeCommentChange(change = {}) {
+  const field = lower(change?.field);
+  const value = change?.value || {};
+
+  if (field.includes("comments")) return true;
+  if (field.includes("comment")) return true;
+
+  if (value?.comment_id || value?.parent_comment_id) return true;
+  if (value?.comment?.id || value?.comment?.parent_id) return true;
+
+  if (
+    lower(value?.verb) === "add" &&
+    (value?.comment_id || value?.message || value?.text || value?.comment_text)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function parseCommentChange(change = {}) {
+  const value = change?.value || {};
+  const field = lower(change?.field);
+
+  const text =
+    cleanText(value?.message) ||
+    cleanText(value?.text) ||
+    cleanText(value?.comment_text) ||
+    cleanText(value?.comment?.text) ||
+    cleanText(value?.comment?.message) ||
+    cleanText(lower(value?.verb) === "add" ? value?.message : "");
+
+  const commentId =
+    s(value?.comment_id) ||
+    s(value?.id) ||
+    s(value?.comment?.id) ||
+    "";
+
+  const parentCommentId =
+    s(value?.parent_id) ||
+    s(value?.parent_comment_id) ||
+    s(value?.comment?.parent_id) ||
+    "";
+
+  const postId =
+    s(value?.post_id) ||
+    s(value?.media_id) ||
+    s(value?.object_id) ||
+    s(value?.post?.id) ||
+    s(value?.media?.id) ||
+    "";
+
+  const fromObj = value?.from || {};
+  const senderObj = value?.sender || {};
+  const commentObj = value?.comment || {};
+
+  const userId =
+    s(fromObj?.id) ||
+    s(senderObj?.id) ||
+    s(value?.user_id) ||
+    s(value?.commenter_id) ||
+    s(commentObj?.from?.id) ||
+    "";
+
+  const username =
+    s(fromObj?.username) ||
+    s(value?.username) ||
+    s(senderObj?.username) ||
+    s(commentObj?.from?.username) ||
+    "";
+
+  const customerName =
+    s(fromObj?.name) ||
+    s(value?.name) ||
+    s(senderObj?.name) ||
+    s(commentObj?.from?.name) ||
+    "";
+
+  const timestamp =
+    normalizeTimestamp(value?.created_time, 0) ||
+    normalizeTimestamp(value?.timestamp, 0) ||
+    normalizeTimestamp(commentObj?.created_time, 0) ||
+    Date.now();
+
+  const channel =
+    field.includes("facebook") || field.includes("messenger") ? "facebook" : "instagram";
+
+  if (!commentId && !text && !userId) {
+    return baseEvent({
+      channel,
+      sourceType: "changes",
+      eventType: "unsupported",
+      userId,
+      timestamp,
+      raw: change,
+      supported: false,
+      ignored: true,
+      ignoreReason: "unsupported_comment_change",
+    });
+  }
+
+  if (!hasText(text)) {
+    return baseEvent({
+      channel,
+      sourceType: "changes",
+      eventType: "comment",
+      userId,
+      text: "",
+      timestamp,
+      messageId: commentId,
+      mid: commentId,
+      externalThreadId: userId,
+      externalCommentId: commentId,
+      externalParentCommentId: parentCommentId,
+      externalPostId: postId,
+      username,
+      customerName,
+      raw: change,
+      supported: false,
+      ignored: true,
+      ignoreReason: "empty_comment_text",
+    });
+  }
+
+  return baseEvent({
+    channel,
+    sourceType: "changes",
+    eventType: "comment",
+    userId,
+    recipientId: "",
+    text,
+    timestamp,
+    messageId: commentId,
+    mid: commentId,
+    externalThreadId: userId,
+    externalCommentId: commentId,
+    externalParentCommentId: parentCommentId,
+    externalPostId: postId,
+    username,
+    customerName,
+    raw: change,
+    supported: true,
+    ignored: false,
+  });
+}
+
 function parseChangeItem(change = {}) {
   const channel = inferChannelFromChange(change);
+
   if (channel === "whatsapp") return parseWhatsAppChange(change);
-  return parseInstagramLikeChange(change);
+
+  if (looksLikeCommentChange(change)) {
+    return parseCommentChange(change);
+  }
+
+  return parseInstagramLikeMessageChange(change);
 }
 
 export function extractMetaEvents(body) {
@@ -479,7 +668,21 @@ export function pickFirstSupportedTextEvent(body) {
   );
 }
 
-// backward-compatible alias
+export function pickFirstSupportedCommentEvent(body) {
+  const events = extractMetaEvents(body);
+  return (
+    events.find(
+      (ev) =>
+        ev &&
+        ev.supported === true &&
+        ev.ignored !== true &&
+        ev.eventType === "comment" &&
+        hasText(ev.text) &&
+        s(ev.externalCommentId)
+    ) || null
+  );
+}
+
 export function pickFirstTextEvent(body) {
   return pickFirstSupportedTextEvent(body);
 }

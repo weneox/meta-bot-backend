@@ -3,6 +3,8 @@ import {
   sendInstagramSeen,
   sendInstagramTypingOn,
   sendInstagramTypingOff,
+  sendInstagramCommentReply,
+  sendFacebookCommentReply,
 } from "./metaSend.js";
 import { notifyAiHqOutbound } from "./aihqOutboundClient.js";
 
@@ -64,12 +66,42 @@ function pickRecipientId(action, ctx = {}) {
   return s(action?.recipientId) || s(ctx?.recipientId) || s(ctx?.userId);
 }
 
+function pickCommentId(action, ctx = {}) {
+  return (
+    s(action?.commentId) ||
+    s(action?.externalCommentId) ||
+    s(action?.meta?.externalCommentId) ||
+    s(ctx?.commentId) ||
+    s(ctx?.externalCommentId)
+  );
+}
+
 function normalizeChannel(action, ctx = {}) {
   return lower(action?.channel || ctx?.channel || "instagram") || "instagram";
 }
 
 function needsRecipient(type) {
   return ["send_message", "mark_seen", "send_seen", "typing_on", "typing_off"].includes(type);
+}
+
+function needsCommentId(type) {
+  return ["reply_comment"].includes(type);
+}
+
+function shouldSkipOutboundAck(action, ctx = {}) {
+  const meta = isObject(action?.meta) ? action.meta : {};
+  const ctxMeta = isObject(ctx?.meta) ? ctx.meta : {};
+
+  return Boolean(
+    meta?.skipOutboundAck ||
+      meta?.internalOutbound ||
+      meta?.alreadyTrackedInAiHq ||
+      meta?.resendAttemptId ||
+      ctxMeta?.skipOutboundAck ||
+      ctxMeta?.internalOutbound ||
+      ctxMeta?.alreadyTrackedInAiHq ||
+      ctxMeta?.resendAttemptId
+  );
 }
 
 function getChannelCapabilities(channel) {
@@ -82,8 +114,24 @@ function getChannelCapabilities(channel) {
       sendSeen: sendInstagramSeen,
       typingOn: sendInstagramTypingOn,
       typingOff: sendInstagramTypingOff,
+      replyComment: sendInstagramCommentReply,
       supportsSeen: true,
       supportsTyping: true,
+      supportsCommentReply: typeof sendInstagramCommentReply === "function",
+    };
+  }
+
+  if (ch === "facebook" || ch === "messenger") {
+    return {
+      supported: true,
+      sendText: null,
+      sendSeen: null,
+      typingOn: null,
+      typingOff: null,
+      replyComment: sendFacebookCommentReply,
+      supportsSeen: false,
+      supportsTyping: false,
+      supportsCommentReply: typeof sendFacebookCommentReply === "function",
     };
   }
 
@@ -93,8 +141,10 @@ function getChannelCapabilities(channel) {
     sendSeen: null,
     typingOn: null,
     typingOff: null,
+    replyComment: null,
     supportsSeen: false,
     supportsTyping: false,
+    supportsCommentReply: false,
   };
 }
 
@@ -144,33 +194,50 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     });
   }
 
+  if (typeof sender !== "function") {
+    return failResult({
+      type: "send_message",
+      channel,
+      error: "send_message not supported for channel",
+      meta,
+    });
+  }
+
   const out = await sender({
     recipientId,
     text,
   });
 
   let outboundAck = null;
+  const skipAck = shouldSkipOutboundAck(action, ctx);
 
   if (out.ok) {
-    outboundAck = await ackOutboundToAiHq({
-      action,
-      ctx,
-      providerResponse: out.json || null,
-    });
-
-    if (outboundAck?.ok) {
-      logInfo("outbound ack synced to AI HQ", {
-        threadId: s(meta?.threadId || ctx?.threadId || ""),
-        providerMessageId: s(
-          out?.json?.message_id || out?.json?.messageId || out?.json?.id || ""
-        ),
+    if (!skipAck) {
+      outboundAck = await ackOutboundToAiHq({
+        action,
+        ctx,
+        providerResponse: out.json || null,
       });
+
+      if (outboundAck?.ok) {
+        logInfo("outbound ack synced to AI HQ", {
+          threadId: s(meta?.threadId || ctx?.threadId || ""),
+          providerMessageId: s(
+            out?.json?.message_id || out?.json?.messageId || out?.json?.id || ""
+          ),
+        });
+      } else {
+        logWarn("outbound ack failed after successful send_message", {
+          threadId: s(meta?.threadId || ctx?.threadId || ""),
+          recipientId,
+          error: s(outboundAck?.error || "unknown outbound ack error"),
+          status: Number(outboundAck?.status || 0),
+        });
+      }
     } else {
-      logWarn("outbound ack failed after successful send_message", {
+      logInfo("outbound ack skipped (already tracked in AI HQ)", {
         threadId: s(meta?.threadId || ctx?.threadId || ""),
-        recipientId,
-        error: s(outboundAck?.error || "unknown outbound ack error"),
-        status: Number(outboundAck?.status || 0),
+        resendAttemptId: s(meta?.resendAttemptId || ctx?.meta?.resendAttemptId || ""),
       });
     }
   } else {
@@ -190,7 +257,76 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     error: out.error || null,
     meta: {
       ...(meta || {}),
+      outboundAckSkipped: skipAck,
       outboundAck: outboundAck || null,
+    },
+    response: out.json || null,
+  };
+}
+
+async function runReplyComment({ action, ctx, channel, commentId, meta, sender }) {
+  const text = s(action?.text || action?.replyText);
+  if (!text) {
+    return failResult({
+      type: "reply_comment",
+      channel,
+      error: "reply text missing",
+      meta,
+    });
+  }
+
+  if (!commentId) {
+    return failResult({
+      type: "reply_comment",
+      channel,
+      error: "commentId missing",
+      meta,
+    });
+  }
+
+  if (typeof sender !== "function") {
+    return failResult({
+      type: "reply_comment",
+      channel,
+      error: "comment reply not supported for channel",
+      meta,
+    });
+  }
+
+  const out = await sender({
+    commentId,
+    text,
+  });
+
+  if (!out.ok) {
+    logWarn("reply_comment failed", {
+      channel,
+      commentId,
+      error: s(out?.error || "unknown comment reply error"),
+      status: Number(out?.status || 0),
+    });
+  } else {
+    logInfo("reply_comment success", {
+      channel,
+      commentId,
+      providerReplyId: s(
+        out?.json?.id ||
+          out?.json?.comment_id ||
+          out?.json?.reply_id ||
+          ""
+      ),
+    });
+  }
+
+  return {
+    type: "reply_comment",
+    channel,
+    ok: Boolean(out.ok),
+    status: Number(out.status || 0),
+    error: out.error || null,
+    meta: {
+      ...(meta || {}),
+      externalCommentId: commentId,
     },
     response: out.json || null,
   };
@@ -277,6 +413,17 @@ function buildPassiveSuccess(type, channel, action, meta) {
     });
   }
 
+  if (type === "comment_saved") {
+    return okResult({
+      type,
+      channel,
+      meta: {
+        ...(meta || {}),
+        note: "comment action already persisted in AI HQ",
+      },
+    });
+  }
+
   return null;
 }
 
@@ -289,6 +436,7 @@ export async function executeMetaActions(actions, ctx = {}) {
     const channel = normalizeChannel(action, ctx);
     const meta = isObject(action?.meta) ? action.meta : null;
     const recipientId = pickRecipientId(action, ctx);
+    const commentId = pickCommentId(action, ctx);
     const caps = getChannelCapabilities(channel);
 
     if (!type) {
@@ -327,6 +475,18 @@ export async function executeMetaActions(actions, ctx = {}) {
       continue;
     }
 
+    if (needsCommentId(type) && !commentId) {
+      results.push(
+        failResult({
+          type,
+          channel,
+          error: "commentId missing",
+          meta,
+        })
+      );
+      continue;
+    }
+
     if (type === "send_message") {
       results.push(
         await runSendMessage({
@@ -336,6 +496,32 @@ export async function executeMetaActions(actions, ctx = {}) {
           recipientId,
           meta,
           sender: caps.sendText,
+        })
+      );
+      continue;
+    }
+
+    if (type === "reply_comment") {
+      if (!caps.supportsCommentReply || !caps.replyComment) {
+        results.push(
+          failResult({
+            type,
+            channel,
+            error: "comment reply not supported for channel",
+            meta,
+          })
+        );
+        continue;
+      }
+
+      results.push(
+        await runReplyComment({
+          action,
+          ctx,
+          channel,
+          commentId,
+          meta,
+          sender: caps.replyComment,
         })
       );
       continue;
