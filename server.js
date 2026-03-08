@@ -1,4 +1,3 @@
-// server.js — meta-bot-backend (modular boot)
 import "dotenv/config";
 import express from "express";
 
@@ -8,15 +7,12 @@ import { registerWebhookRoutes } from "./src/routes/webhook.js";
 
 const app = express();
 
-// JSON body
 app.use(express.json({ limit: "2mb" }));
 
-// Health
 app.get("/", (req, res) => {
   res.status(200).send("Meta Bot Backend is working");
 });
 
-// Routes
 registerPublicPages(app);
 registerWebhookRoutes(app);
 
