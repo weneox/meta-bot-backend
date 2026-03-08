@@ -1,7 +1,7 @@
 // src/routes/webhook.js
 import { VERIFY_TOKEN } from "../config.js";
 import { pickFirstTextEvent } from "../utils/metaParser.js";
-import { forwardToN8n } from "../services/n8nClient.js";
+import { forwardToAiHq } from "../services/aihqClient.js";
 
 export function registerWebhookRoutes(app) {
   // Meta verify (Webhook Verification)
@@ -34,16 +34,16 @@ export function registerWebhookRoutes(app) {
         timestamp: ev.timestamp,
       };
 
-      const out = await forwardToN8n(payload);
+      const out = await forwardToAiHq(payload);
 
-      console.log("[meta-bot] forwarded to n8n:", {
+      console.log("[meta-bot] forwarded to AI HQ:", {
         ok: out.ok,
         status: out.status,
         error: out.error,
         preview: (out.json ?? out.text ?? "").toString().slice(0, 160),
       });
 
-      // Sonrakı addım: out.json.replyText varsa Graph API ilə cavab göndərmək.
+      // Sonrakı addım: AI HQ-dan gələn cavabı Graph API ilə user-ə geri göndərəcəyik.
     } catch (err) {
       console.error("[meta-bot] Error:", err);
     }
