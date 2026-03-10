@@ -2,7 +2,9 @@ import {
   META_PAGE_ACCESS_TOKEN,
   META_API_VERSION,
   META_REPLY_TIMEOUT_MS,
+  META_TOKEN_FALLBACK_ENABLED,
 } from "../config.js";
+import { getTenantMetaConfig } from "./tenantProviderSecrets.js";
 
 function s(v) {
   return String(v ?? "").trim();
@@ -12,18 +14,20 @@ function lower(v) {
   return s(v).toLowerCase();
 }
 
-function fail(error, status = 0, json = null) {
+function fail(error, status = 0, json = null, meta = null) {
   return {
     ok: false,
     status: Number(status || 0),
     error: s(error || "unknown error"),
     json,
+    meta,
   };
 }
 
 async function safeReadJson(res) {
   const text = await res.text().catch(() => "");
   if (!text) return null;
+
   try {
     return JSON.parse(text);
   } catch {
@@ -46,14 +50,64 @@ function graphNodeEndpoint(nodeId, edge = "") {
   return cleanEdge ? `${graphBase()}/${id}/${cleanEdge}` : `${graphBase()}/${id}`;
 }
 
-async function postJson(url, body) {
-  const token = s(META_PAGE_ACCESS_TOKEN);
+async function resolveMetaAccessToken({ tenantKey = "" } = {}) {
+  const envToken = s(META_PAGE_ACCESS_TOKEN);
+  const safeTenantKey = lower(tenantKey);
+  const allowEnvFallback = Boolean(META_TOKEN_FALLBACK_ENABLED);
+
+  if (safeTenantKey) {
+    try {
+      const metaCfg = await getTenantMetaConfig(safeTenantKey);
+      const tenantToken = s(metaCfg?.pageAccessToken);
+
+      if (tenantToken) {
+        return {
+          accessToken: tenantToken,
+          source: "tenant_secret",
+        };
+      }
+    } catch {
+      // ignore and continue to fallback
+    }
+  }
+
+  if (allowEnvFallback && envToken) {
+    return {
+      accessToken: envToken,
+      source: "env",
+    };
+  }
+
+  return {
+    accessToken: "",
+    source: "none",
+  };
+}
+
+async function postJson(url, body, opts = {}) {
+  const safeTenantKey = lower(opts?.tenantKey || "");
+  const creds = await resolveMetaAccessToken({
+    tenantKey: safeTenantKey,
+  });
+
+  const token = s(creds.accessToken);
   if (!token) {
-    return fail("META_PAGE_ACCESS_TOKEN missing");
+    return fail(
+      "META_PAGE_ACCESS_TOKEN missing and tenant meta secret not found",
+      0,
+      null,
+      {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      }
+    );
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), META_REPLY_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number(META_REPLY_TIMEOUT_MS || 20000)
+  );
 
   try {
     const res = await fetch(url, {
@@ -76,27 +130,54 @@ async function postJson(url, body) {
       error: res.ok
         ? null
         : json?.error?.message || json?.message || "Meta request failed",
+      meta: {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      },
     };
   } catch (err) {
     return fail(
-      err?.name === "AbortError" ? "Meta timeout" : String(err?.message || err)
+      err?.name === "AbortError" ? "Meta timeout" : String(err?.message || err),
+      0,
+      null,
+      {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      }
     );
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function postForm(url, params) {
-  const token = s(META_PAGE_ACCESS_TOKEN);
+async function postForm(url, params, opts = {}) {
+  const safeTenantKey = lower(opts?.tenantKey || "");
+  const creds = await resolveMetaAccessToken({
+    tenantKey: safeTenantKey,
+  });
+
+  const token = s(creds.accessToken);
   if (!token) {
-    return fail("META_PAGE_ACCESS_TOKEN missing");
+    return fail(
+      "META_PAGE_ACCESS_TOKEN missing and tenant meta secret not found",
+      0,
+      null,
+      {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      }
+    );
   }
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), META_REPLY_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(),
+    Number(META_REPLY_TIMEOUT_MS || 20000)
+  );
 
   try {
     const body = new URLSearchParams();
+
     for (const [k, v] of Object.entries(params || {})) {
       if (v == null) continue;
       body.set(k, String(v));
@@ -121,10 +202,20 @@ async function postForm(url, params) {
       error: res.ok
         ? null
         : json?.error?.message || json?.message || "Meta request failed",
+      meta: {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      },
     };
   } catch (err) {
     return fail(
-      err?.name === "AbortError" ? "Meta timeout" : String(err?.message || err)
+      err?.name === "AbortError" ? "Meta timeout" : String(err?.message || err),
+      0,
+      null,
+      {
+        credentialSource: creds.source,
+        tenantKey: safeTenantKey,
+      }
     );
   } finally {
     clearTimeout(timer);
@@ -147,90 +238,124 @@ function buildRecipient(recipientId) {
   return { id: s(recipientId) };
 }
 
-async function sendText({ recipientId, text, messagingType = "RESPONSE" }) {
+async function sendText({
+  recipientId,
+  text,
+  messagingType = "RESPONSE",
+  tenantKey = "",
+}) {
   const recipient = requireRecipient(recipientId);
   if (!recipient.ok) return fail(recipient.error);
 
   const bodyText = s(text);
   if (!bodyText) return fail("text missing");
 
-  return postJson(metaMessagesEndpoint(), {
-    recipient: buildRecipient(recipient.value),
-    messaging_type: s(messagingType || "RESPONSE") || "RESPONSE",
-    message: { text: bodyText },
-  });
+  return postJson(
+    metaMessagesEndpoint(),
+    {
+      recipient: buildRecipient(recipient.value),
+      messaging_type: s(messagingType || "RESPONSE") || "RESPONSE",
+      message: { text: bodyText },
+    },
+    { tenantKey }
+  );
 }
 
-async function sendSenderAction({ recipientId, action }) {
+async function sendSenderAction({ recipientId, action, tenantKey = "" }) {
   const recipient = requireRecipient(recipientId);
   if (!recipient.ok) return fail(recipient.error);
 
   const senderAction = lower(action);
   if (!senderAction) return fail("sender action missing");
 
-  return postJson(metaMessagesEndpoint(), {
-    recipient: buildRecipient(recipient.value),
-    sender_action: senderAction,
-  });
+  return postJson(
+    metaMessagesEndpoint(),
+    {
+      recipient: buildRecipient(recipient.value),
+      sender_action: senderAction,
+    },
+    { tenantKey }
+  );
 }
 
-export async function sendInstagramTextMessage({ recipientId, text }) {
+export async function sendInstagramTextMessage({
+  recipientId,
+  text,
+  tenantKey = "",
+}) {
   return sendText({
     recipientId,
     text,
     messagingType: "RESPONSE",
+    tenantKey,
   });
 }
 
-export async function sendInstagramSeen({ recipientId }) {
+export async function sendInstagramSeen({
+  recipientId,
+  tenantKey = "",
+}) {
   return sendSenderAction({
     recipientId,
     action: "mark_seen",
+    tenantKey,
   });
 }
 
-export async function sendInstagramTypingOn({ recipientId }) {
+export async function sendInstagramTypingOn({
+  recipientId,
+  tenantKey = "",
+}) {
   return sendSenderAction({
     recipientId,
     action: "typing_on",
+    tenantKey,
   });
 }
 
-export async function sendInstagramTypingOff({ recipientId }) {
+export async function sendInstagramTypingOff({
+  recipientId,
+  tenantKey = "",
+}) {
   return sendSenderAction({
     recipientId,
     action: "typing_off",
+    tenantKey,
   });
 }
 
-/**
- * Instagram public comment reply
- * Docs indicate replies are created on /{ig-comment-id}/replies with a message param.
- */
-export async function sendInstagramCommentReply({ commentId, text }) {
+export async function sendInstagramCommentReply({
+  commentId,
+  text,
+  tenantKey = "",
+}) {
   const comment = requireCommentId(commentId);
   if (!comment.ok) return fail(comment.error);
 
   const bodyText = s(text);
   if (!bodyText) return fail("text missing");
 
-  return postForm(graphNodeEndpoint(comment.value, "replies"), {
-    message: bodyText,
-  });
+  return postForm(
+    graphNodeEndpoint(comment.value, "replies"),
+    { message: bodyText },
+    { tenantKey }
+  );
 }
 
-/**
- * Facebook Page public comment reply
- * Reply is created by posting a comment on the parent comment via /{comment-id}/comments.
- */
-export async function sendFacebookCommentReply({ commentId, text }) {
+export async function sendFacebookCommentReply({
+  commentId,
+  text,
+  tenantKey = "",
+}) {
   const comment = requireCommentId(commentId);
   if (!comment.ok) return fail(comment.error);
 
   const bodyText = s(text);
   if (!bodyText) return fail("text missing");
 
-  return postForm(graphNodeEndpoint(comment.value, "comments"), {
-    message: bodyText,
-  });
+  return postForm(
+    graphNodeEndpoint(comment.value, "comments"),
+    { message: bodyText },
+    { tenantKey }
+  );
 }

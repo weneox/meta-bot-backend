@@ -81,12 +81,72 @@ function inferChannelFromChange(change = {}) {
   return "instagram";
 }
 
+function pickMessagingPageId(ev = {}) {
+  return (
+    s(ev?.recipient?.id) ||
+    s(ev?.recipient?.page_id) ||
+    s(ev?.page_id) ||
+    s(ev?.pageId) ||
+    ""
+  );
+}
+
+function pickMessagingIgUserId(ev = {}) {
+  return (
+    s(ev?.recipient?.instagram_id) ||
+    s(ev?.recipient?.ig_user_id) ||
+    s(ev?.ig_user_id) ||
+    s(ev?.igUserId) ||
+    ""
+  );
+}
+
+function pickChangePageId(change = {}) {
+  const value = change?.value || {};
+  return (
+    s(value?.page_id) ||
+    s(value?.recipient_id) ||
+    s(value?.recipient?.id) ||
+    s(value?.post?.from?.id) ||
+    ""
+  );
+}
+
+function pickChangeIgUserId(change = {}) {
+  const value = change?.value || {};
+  return (
+    s(value?.instagram_id) ||
+    s(value?.ig_user_id) ||
+    s(value?.recipient?.instagram_id) ||
+    s(value?.recipient?.ig_user_id) ||
+    s(value?.from?.id && inferChannelFromChange(change) === "instagram" ? value?.from?.id : "") ||
+    ""
+  );
+}
+
+function pickExternalAccountId({ channel = "", recipientId = "", pageId = "", igUserId = "" }) {
+  const ch = lower(channel);
+  if (ch === "instagram") {
+    return s(igUserId || recipientId || pageId);
+  }
+  if (ch === "facebook" || ch === "messenger") {
+    return s(pageId || recipientId || igUserId);
+  }
+  if (ch === "whatsapp") {
+    return s(recipientId || pageId || igUserId);
+  }
+  return s(recipientId || pageId || igUserId);
+}
+
 function baseEvent({
   channel = "instagram",
   sourceType = "unknown",
   eventType = "unsupported",
   userId = "",
   recipientId = "",
+  pageId = "",
+  igUserId = "",
+  externalAccountId = "",
   text = "",
   timestamp = Date.now(),
   messageId = "",
@@ -104,16 +164,29 @@ function baseEvent({
   hasAttachments = false,
   attachments = [],
 }) {
+  const safeChannel = s(channel || "instagram").toLowerCase() || "instagram";
   const uid = s(userId);
   const rid = s(recipientId);
+  const pgid = s(pageId);
+  const igid = s(igUserId);
   const msgId = s(messageId || mid);
 
   return {
-    channel: s(channel || "instagram").toLowerCase() || "instagram",
+    channel: safeChannel,
     sourceType: s(sourceType || "unknown"),
     eventType: s(eventType || "unsupported"),
     userId: uid,
     recipientId: rid,
+    pageId: pgid,
+    igUserId: igid,
+    externalAccountId:
+      s(externalAccountId) ||
+      pickExternalAccountId({
+        channel: safeChannel,
+        recipientId: rid,
+        pageId: pgid,
+        igUserId: igid,
+      }),
     text: cleanText(text),
     timestamp: normalizeTimestamp(timestamp, Date.now()),
     messageId: msgId,
@@ -182,6 +255,8 @@ function parseMessagingItem(ev = {}) {
   const channel = inferChannelFromMessaging(ev);
   const senderId = s(ev?.sender?.id);
   const recipientId = s(ev?.recipient?.id);
+  const pageId = pickMessagingPageId(ev);
+  const igUserId = pickMessagingIgUserId(ev);
   const timestamp = normalizeTimestamp(ev?.timestamp, Date.now());
   const message = ev?.message || {};
   const text = cleanText(message?.text);
@@ -195,6 +270,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "read",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       raw: ev,
       supported: false,
@@ -210,6 +287,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "delivery",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       raw: ev,
       supported: false,
@@ -225,6 +304,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "reaction",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       raw: ev,
       supported: false,
@@ -240,6 +321,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "echo",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       messageId,
       mid: messageId,
@@ -257,6 +340,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "text",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       text,
       timestamp,
       messageId,
@@ -274,6 +359,8 @@ function parseMessagingItem(ev = {}) {
       eventType: "attachment",
       userId: senderId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       messageId,
       mid: messageId,
@@ -293,6 +380,8 @@ function parseMessagingItem(ev = {}) {
     eventType: "unsupported",
     userId: senderId,
     recipientId,
+    pageId,
+    igUserId,
     timestamp,
     messageId,
     mid: messageId,
@@ -310,7 +399,9 @@ function parseWhatsAppChange(change = {}) {
   const timestamp = normalizeTimestamp(msg?.timestamp, Date.now());
   const messageId = s(msg?.id || "");
   const userId = s(value?.contacts?.[0]?.wa_id) || s(msg?.from);
-  const recipientId = s(value?.metadata?.display_phone_number || "");
+  const recipientId = s(value?.metadata?.phone_number_id || value?.metadata?.display_phone_number || "");
+  const pageId = "";
+  const igUserId = "";
   const attachments = pickChangeAttachments(value);
   const type = lower(msg?.type);
 
@@ -321,6 +412,8 @@ function parseWhatsAppChange(change = {}) {
       eventType: "reaction",
       userId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       messageId,
       mid: messageId,
@@ -338,6 +431,8 @@ function parseWhatsAppChange(change = {}) {
       eventType: "text",
       userId,
       recipientId,
+      pageId,
+      igUserId,
       text,
       timestamp,
       messageId,
@@ -355,6 +450,8 @@ function parseWhatsAppChange(change = {}) {
       eventType: "attachment",
       userId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       messageId,
       mid: messageId,
@@ -374,6 +471,8 @@ function parseWhatsAppChange(change = {}) {
     eventType: "unsupported",
     userId,
     recipientId,
+    pageId,
+    igUserId,
     timestamp,
     messageId,
     mid: messageId,
@@ -420,6 +519,8 @@ function parseInstagramLikeMessageChange(change = {}) {
     s(value?.recipient_id) ||
     "";
 
+  const pageId = pickChangePageId(change);
+  const igUserId = pickChangeIgUserId(change);
   const attachments = pickChangeAttachments(value);
 
   if (hasText(text)) {
@@ -429,6 +530,8 @@ function parseInstagramLikeMessageChange(change = {}) {
       eventType: "text",
       userId,
       recipientId,
+      pageId,
+      igUserId,
       text,
       timestamp,
       messageId,
@@ -448,6 +551,8 @@ function parseInstagramLikeMessageChange(change = {}) {
       eventType: "attachment",
       userId,
       recipientId,
+      pageId,
+      igUserId,
       timestamp,
       messageId,
       mid: s(msg0?.mid || messageId),
@@ -467,6 +572,8 @@ function parseInstagramLikeMessageChange(change = {}) {
     eventType: "unsupported",
     userId,
     recipientId,
+    pageId,
+    igUserId,
     timestamp,
     messageId,
     mid: s(msg0?.mid || messageId),
@@ -564,12 +671,17 @@ function parseCommentChange(change = {}) {
   const channel =
     field.includes("facebook") || field.includes("messenger") ? "facebook" : "instagram";
 
+  const pageId = pickChangePageId(change);
+  const igUserId = pickChangeIgUserId(change);
+
   if (!commentId && !text && !userId) {
     return baseEvent({
       channel,
       sourceType: "changes",
       eventType: "unsupported",
       userId,
+      pageId,
+      igUserId,
       timestamp,
       raw: change,
       supported: false,
@@ -584,6 +696,9 @@ function parseCommentChange(change = {}) {
       sourceType: "changes",
       eventType: "comment",
       userId,
+      recipientId: "",
+      pageId,
+      igUserId,
       text: "",
       timestamp,
       messageId: commentId,
@@ -607,6 +722,8 @@ function parseCommentChange(change = {}) {
     eventType: "comment",
     userId,
     recipientId: "",
+    pageId,
+    igUserId,
     text,
     timestamp,
     messageId: commentId,

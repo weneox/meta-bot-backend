@@ -80,6 +80,44 @@ function normalizeChannel(action, ctx = {}) {
   return lower(action?.channel || ctx?.channel || "instagram") || "instagram";
 }
 
+function pickTenantKey(action, ctx = {}) {
+  const meta = isObject(action?.meta) ? action.meta : {};
+  const ctxMeta = isObject(ctx?.meta) ? ctx.meta : {};
+
+  return (
+    lower(
+      action?.tenantKey ||
+        action?.tenant_key ||
+        meta?.tenantKey ||
+        meta?.tenant_key ||
+        ctx?.tenantKey ||
+        ctx?.tenant_key ||
+        ctxMeta?.tenantKey ||
+        ctxMeta?.tenant_key ||
+        ""
+    ) || "default"
+  );
+}
+
+function pickTenantId(action, ctx = {}) {
+  const meta = isObject(action?.meta) ? action.meta : {};
+  const ctxMeta = isObject(ctx?.meta) ? ctx.meta : {};
+
+  return (
+    s(
+      action?.tenantId ||
+        action?.tenant_id ||
+        meta?.tenantId ||
+        meta?.tenant_id ||
+        ctx?.tenantId ||
+        ctx?.tenant_id ||
+        ctxMeta?.tenantId ||
+        ctxMeta?.tenant_id ||
+        ""
+    ) || ""
+  );
+}
+
 function needsRecipient(type) {
   return ["send_message", "mark_seen", "send_seen", "typing_on", "typing_off"].includes(type);
 }
@@ -150,9 +188,12 @@ function getChannelCapabilities(channel) {
 
 async function ackOutboundToAiHq({ action, ctx, providerResponse }) {
   const meta = isObject(action?.meta) ? action.meta : {};
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx);
 
   const payload = {
-    tenantKey: s(meta?.tenantKey || ctx?.tenantKey || "neox") || "neox",
+    tenantKey,
+    tenantId: tenantId || null,
     channel: normalizeChannel(action, ctx),
     threadId: s(meta?.threadId || ctx?.threadId || ""),
     recipientId: pickRecipientId(action, ctx),
@@ -167,6 +208,8 @@ async function ackOutboundToAiHq({ action, ctx, providerResponse }) {
         ""
     ),
     meta: {
+      tenantKey,
+      tenantId: tenantId || null,
       actionMeta: meta,
       providerResponse: providerResponse || null,
     },
@@ -185,6 +228,7 @@ async function ackOutboundToAiHq({ action, ctx, providerResponse }) {
 
 async function runSendMessage({ action, ctx, channel, recipientId, meta, sender }) {
   const text = s(action?.text);
+
   if (!text) {
     return failResult({
       type: "send_message",
@@ -203,9 +247,15 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     });
   }
 
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx) || null;
+
   const out = await sender({
     recipientId,
     text,
+    tenantKey,
+    tenantId,
+    meta: meta || {},
   });
 
   let outboundAck = null;
@@ -225,11 +275,13 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
           providerMessageId: s(
             out?.json?.message_id || out?.json?.messageId || out?.json?.id || ""
           ),
+          tenantKey,
         });
       } else {
         logWarn("outbound ack failed after successful send_message", {
           threadId: s(meta?.threadId || ctx?.threadId || ""),
           recipientId,
+          tenantKey,
           error: s(outboundAck?.error || "unknown outbound ack error"),
           status: Number(outboundAck?.status || 0),
         });
@@ -237,6 +289,7 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     } else {
       logInfo("outbound ack skipped (already tracked in AI HQ)", {
         threadId: s(meta?.threadId || ctx?.threadId || ""),
+        tenantKey,
         resendAttemptId: s(meta?.resendAttemptId || ctx?.meta?.resendAttemptId || ""),
       });
     }
@@ -244,6 +297,7 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     logWarn("send_message failed", {
       threadId: s(meta?.threadId || ctx?.threadId || ""),
       recipientId,
+      tenantKey,
       error: s(out?.error || "unknown send error"),
       status: Number(out?.status || 0),
     });
@@ -257,6 +311,8 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
     error: out.error || null,
     meta: {
       ...(meta || {}),
+      tenantKey,
+      tenantId,
       outboundAckSkipped: skipAck,
       outboundAck: outboundAck || null,
     },
@@ -266,6 +322,7 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
 
 async function runReplyComment({ action, ctx, channel, commentId, meta, sender }) {
   const text = s(action?.text || action?.replyText);
+
   if (!text) {
     return failResult({
       type: "reply_comment",
@@ -293,15 +350,22 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
     });
   }
 
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx) || null;
+
   const out = await sender({
     commentId,
     text,
+    tenantKey,
+    tenantId,
+    meta: meta || {},
   });
 
   if (!out.ok) {
     logWarn("reply_comment failed", {
       channel,
       commentId,
+      tenantKey,
       error: s(out?.error || "unknown comment reply error"),
       status: Number(out?.status || 0),
     });
@@ -309,6 +373,7 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
     logInfo("reply_comment success", {
       channel,
       commentId,
+      tenantKey,
       providerReplyId: s(
         out?.json?.id ||
           out?.json?.comment_id ||
@@ -326,18 +391,29 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
     error: out.error || null,
     meta: {
       ...(meta || {}),
+      tenantKey,
+      tenantId,
       externalCommentId: commentId,
     },
     response: out.json || null,
   };
 }
 
-async function runSeen({ type, channel, recipientId, meta, sender }) {
-  const out = await sender({ recipientId });
+async function runSeen({ type, action, ctx, channel, recipientId, meta, sender }) {
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx) || null;
+
+  const out = await sender({
+    recipientId,
+    tenantKey,
+    tenantId,
+    meta: meta || {},
+  });
 
   if (!out.ok) {
     logWarn("mark_seen failed", {
       recipientId,
+      tenantKey,
       error: s(out?.error || "unknown mark_seen error"),
       status: Number(out?.status || 0),
     });
@@ -349,17 +425,30 @@ async function runSeen({ type, channel, recipientId, meta, sender }) {
     ok: Boolean(out.ok),
     status: Number(out.status || 0),
     error: out.error || null,
-    meta,
+    meta: {
+      ...(meta || {}),
+      tenantKey,
+      tenantId,
+    },
     response: out.json || null,
   };
 }
 
-async function runTyping({ type, channel, recipientId, meta, sender, logLabel }) {
-  const out = await sender({ recipientId });
+async function runTyping({ type, action, ctx, channel, recipientId, meta, sender, logLabel }) {
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx) || null;
+
+  const out = await sender({
+    recipientId,
+    tenantKey,
+    tenantId,
+    meta: meta || {},
+  });
 
   if (!out.ok) {
     logWarn(`${logLabel} failed`, {
       recipientId,
+      tenantKey,
       error: s(out?.error || `unknown ${logLabel} error`),
       status: Number(out?.status || 0),
     });
@@ -371,18 +460,27 @@ async function runTyping({ type, channel, recipientId, meta, sender, logLabel })
     ok: Boolean(out.ok),
     status: Number(out.status || 0),
     error: out.error || null,
-    meta,
+    meta: {
+      ...(meta || {}),
+      tenantKey,
+      tenantId,
+    },
     response: out.json || null,
   };
 }
 
-function buildPassiveSuccess(type, channel, action, meta) {
+function buildPassiveSuccess(type, channel, action, meta, ctx = {}) {
+  const tenantKey = pickTenantKey(action, ctx);
+  const tenantId = pickTenantId(action, ctx) || null;
+
   if (type === "create_lead") {
     return okResult({
       type,
       channel,
       meta: {
         ...(meta || {}),
+        tenantKey,
+        tenantId,
         lead: action?.lead || null,
         note: "lead already persisted in AI HQ",
       },
@@ -395,6 +493,8 @@ function buildPassiveSuccess(type, channel, action, meta) {
       channel,
       meta: {
         ...(meta || {}),
+        tenantKey,
+        tenantId,
         reason: s(action?.reason || "manual_review"),
         priority: s(action?.priority || "normal"),
         note: "handoff already persisted in AI HQ",
@@ -408,6 +508,8 @@ function buildPassiveSuccess(type, channel, action, meta) {
       channel,
       meta: {
         ...(meta || {}),
+        tenantKey,
+        tenantId,
         reason: s(action?.reason || "rule_suppressed"),
       },
     });
@@ -419,6 +521,8 @@ function buildPassiveSuccess(type, channel, action, meta) {
       channel,
       meta: {
         ...(meta || {}),
+        tenantKey,
+        tenantId,
         note: "comment action already persisted in AI HQ",
       },
     });
@@ -543,6 +647,8 @@ export async function executeMetaActions(actions, ctx = {}) {
       results.push(
         await runSeen({
           type,
+          action,
+          ctx,
           channel,
           recipientId,
           meta,
@@ -568,6 +674,8 @@ export async function executeMetaActions(actions, ctx = {}) {
       results.push(
         await runTyping({
           type,
+          action,
+          ctx,
           channel,
           recipientId,
           meta,
@@ -594,6 +702,8 @@ export async function executeMetaActions(actions, ctx = {}) {
       results.push(
         await runTyping({
           type,
+          action,
+          ctx,
           channel,
           recipientId,
           meta,
@@ -604,7 +714,7 @@ export async function executeMetaActions(actions, ctx = {}) {
       continue;
     }
 
-    const passive = buildPassiveSuccess(type, channel, action, meta);
+    const passive = buildPassiveSuccess(type, channel, action, meta, ctx);
     if (passive) {
       results.push(passive);
       continue;
@@ -613,6 +723,7 @@ export async function executeMetaActions(actions, ctx = {}) {
     logWarn("unsupported action", {
       type: type || "unknown",
       channel: channel || "unknown",
+      tenantKey: pickTenantKey(action, ctx),
     });
 
     results.push(

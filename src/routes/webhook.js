@@ -5,9 +5,18 @@ import {
   forwardCommentToAiHq,
 } from "../services/aihqClient.js";
 import { executeMetaActions } from "../services/actionExecutor.js";
+import { resolveTenantContextFromMetaEvent } from "../services/tenantResolver.js";
 
 function s(v) {
   return String(v ?? "").trim();
+}
+
+function safeJsonPreview(v, limit = 220) {
+  try {
+    return JSON.stringify(v ?? {}).slice(0, limit);
+  } catch {
+    return "";
+  }
 }
 
 function logInfo(message, data = null) {
@@ -55,7 +64,7 @@ function summarizeExec(exec) {
   };
 }
 
-function buildAihqInboxPayload(ev, rawBody) {
+function buildAihqInboxPayload(ev, rawBody, tenantCtx) {
   const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
   const externalUserId = s(ev?.userId || "");
   const externalMessageId = s(ev?.messageId || ev?.mid || "");
@@ -63,7 +72,7 @@ function buildAihqInboxPayload(ev, rawBody) {
   const text = s(ev?.text || "");
 
   return {
-    tenantKey: "neox",
+    tenantKey: s(tenantCtx?.tenantKey || ""),
     source: "meta",
     platform: channel,
     channel,
@@ -76,14 +85,19 @@ function buildAihqInboxPayload(ev, rawBody) {
     text,
     timestamp: Number(ev?.timestamp || Date.now()),
     raw: rawBody,
+    metaAccount: {
+      recipientId: s(ev?.recipientId || ""),
+      pageId: s(ev?.pageId || ""),
+      igUserId: s(ev?.igUserId || ""),
+    },
   };
 }
 
-function buildAihqCommentPayload(ev, rawBody) {
+function buildAihqCommentPayload(ev, rawBody, tenantCtx) {
   const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
 
   return {
-    tenantKey: "neox",
+    tenantKey: s(tenantCtx?.tenantKey || ""),
     source: "meta",
     platform: channel,
     channel,
@@ -100,6 +114,11 @@ function buildAihqCommentPayload(ev, rawBody) {
     text: s(ev?.text || ""),
     timestamp: Number(ev?.timestamp || Date.now()),
     raw: rawBody,
+    metaAccount: {
+      recipientId: s(ev?.recipientId || ""),
+      pageId: s(ev?.pageId || ""),
+      igUserId: s(ev?.igUserId || ""),
+    },
   };
 }
 
@@ -109,6 +128,8 @@ function summarizeInbound(ev) {
     eventType: s(ev?.eventType || "unknown"),
     userId: s(ev?.userId || ""),
     recipientId: s(ev?.recipientId || ""),
+    pageId: s(ev?.pageId || ""),
+    igUserId: s(ev?.igUserId || ""),
     externalThreadId: s(ev?.externalThreadId || ""),
     externalMessageId: s(ev?.messageId || ev?.mid || ""),
     externalCommentId: s(ev?.externalCommentId || ""),
@@ -121,12 +142,56 @@ function summarizeInbound(ev) {
   };
 }
 
-async function handleSupportedTextEvent(ev, rawBody) {
-  const payload = buildAihqInboxPayload(ev, rawBody);
+async function resolveTenantForEvent(ev) {
+  const out = await resolveTenantContextFromMetaEvent({
+    channel: s(ev?.channel || "instagram").toLowerCase() || "instagram",
+    recipientId: s(ev?.recipientId || ""),
+    pageId: s(ev?.pageId || ""),
+    igUserId: s(ev?.igUserId || ""),
+  });
 
-  logInfo("inbound text event", summarizeInbound(ev));
+  if (!out?.ok || !s(out?.tenantKey)) {
+    return {
+      ok: false,
+      error: s(out?.error || "tenant_not_resolved"),
+      tenantKey: "",
+      tenant: null,
+      channelConfig: null,
+    };
+  }
+
+  return {
+    ok: true,
+    tenantKey: s(out.tenantKey),
+    tenant: out.tenant || null,
+    channelConfig: out.channelConfig || null,
+  };
+}
+
+function pickResolvedTenantKey(aihqResponse, tenantCtx) {
+  return s(aihqResponse?.json?.tenant?.tenant_key || tenantCtx?.tenantKey || "");
+}
+
+async function handleSupportedTextEvent(ev, rawBody) {
+  const tenantCtx = await resolveTenantForEvent(ev);
+
+  if (!tenantCtx.ok) {
+    logWarn("tenant resolution failed for text event", {
+      ...summarizeInbound(ev),
+      error: tenantCtx.error,
+    });
+    return;
+  }
+
+  const payload = buildAihqInboxPayload(ev, rawBody, tenantCtx);
+
+  logInfo("inbound text event", {
+    ...summarizeInbound(ev),
+    tenantKey: tenantCtx.tenantKey,
+  });
 
   const out = await forwardToAiHq(payload);
+  const resolvedTenantKey = pickResolvedTenantKey(out, tenantCtx);
 
   logInfo("forwarded text to AI HQ", {
     ok: out.ok,
@@ -138,7 +203,8 @@ async function handleSupportedTextEvent(ev, rawBody) {
     leadScore: Number(out?.json?.leadScore || 0),
     actionsCount: Array.isArray(out?.json?.actions) ? out.json.actions.length : 0,
     threadId: s(out?.json?.thread?.id || ""),
-    preview: JSON.stringify(out?.json || {}).slice(0, 220),
+    tenantKey: resolvedTenantKey,
+    preview: safeJsonPreview(out?.json),
   });
 
   if (!out.ok) {
@@ -148,6 +214,7 @@ async function handleSupportedTextEvent(ev, rawBody) {
       externalMessageId: s(ev?.messageId || ev?.mid || ""),
       error: s(out?.error || ""),
       status: Number(out?.status || 0),
+      tenantKey: resolvedTenantKey,
     });
     return;
   }
@@ -160,6 +227,7 @@ async function handleSupportedTextEvent(ev, rawBody) {
       deduped: Boolean(out?.json?.deduped),
       intent: s(out?.json?.intent || ""),
       threadId: s(out?.json?.thread?.id || ""),
+      tenantKey: resolvedTenantKey,
     });
     return;
   }
@@ -168,19 +236,36 @@ async function handleSupportedTextEvent(ev, rawBody) {
     channel: s(ev?.channel || "instagram").toLowerCase() || "instagram",
     userId: s(ev?.userId || ""),
     recipientId: s(ev?.userId || ""),
-    tenantKey: s(out?.json?.tenant?.tenant_key || "neox"),
+    tenantKey: resolvedTenantKey,
     threadId: s(out?.json?.thread?.id || ""),
   });
 
-  logInfo("text action execution summary", summarizeExec(exec));
+  logInfo("text action execution summary", {
+    tenantKey: resolvedTenantKey,
+    ...summarizeExec(exec),
+  });
 }
 
 async function handleSupportedCommentEvent(ev, rawBody) {
-  const payload = buildAihqCommentPayload(ev, rawBody);
+  const tenantCtx = await resolveTenantForEvent(ev);
 
-  logInfo("inbound comment event", summarizeInbound(ev));
+  if (!tenantCtx.ok) {
+    logWarn("tenant resolution failed for comment event", {
+      ...summarizeInbound(ev),
+      error: tenantCtx.error,
+    });
+    return;
+  }
+
+  const payload = buildAihqCommentPayload(ev, rawBody, tenantCtx);
+
+  logInfo("inbound comment event", {
+    ...summarizeInbound(ev),
+    tenantKey: tenantCtx.tenantKey,
+  });
 
   const out = await forwardCommentToAiHq(payload);
+  const resolvedTenantKey = pickResolvedTenantKey(out, tenantCtx);
 
   logInfo("forwarded comment to AI HQ", {
     ok: out.ok,
@@ -191,7 +276,8 @@ async function handleSupportedCommentEvent(ev, rawBody) {
     requiresHuman: Boolean(out?.json?.classification?.requiresHuman),
     shouldCreateLead: Boolean(out?.json?.classification?.shouldCreateLead),
     commentId: s(out?.json?.comment?.id || ""),
-    preview: JSON.stringify(out?.json || {}).slice(0, 220),
+    tenantKey: resolvedTenantKey,
+    preview: safeJsonPreview(out?.json),
   });
 
   if (!out.ok) {
@@ -201,6 +287,7 @@ async function handleSupportedCommentEvent(ev, rawBody) {
       externalCommentId: s(ev?.externalCommentId || ""),
       error: s(out?.error || ""),
       status: Number(out?.status || 0),
+      tenantKey: resolvedTenantKey,
     });
   }
 }

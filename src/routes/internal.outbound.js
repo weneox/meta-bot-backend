@@ -6,10 +6,41 @@ function s(v) {
   return String(v ?? "").trim();
 }
 
+function lower(v) {
+  return s(v).toLowerCase();
+}
+
+function isObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 function requireInternalToken(req) {
-  const token = s(req.headers["x-internal-token"] || "");
-  const expected = s(AIHQ_INTERNAL_TOKEN || "");
+  const token = s(req.headers["x-internal-token"]);
+  const expected = s(AIHQ_INTERNAL_TOKEN);
   return Boolean(token && expected && token === expected);
+}
+
+function pickTenantKey(req) {
+  return (
+    lower(
+      req.body?.tenantKey ||
+        req.body?.tenant_key ||
+        req.body?.meta?.tenantKey ||
+        req.body?.meta?.tenant_key ||
+        req.headers["x-tenant-key"] ||
+        ""
+    ) || "default"
+  );
+}
+
+function pickTenantId(req) {
+  return s(
+    req.body?.tenantId ||
+      req.body?.tenant_id ||
+      req.body?.meta?.tenantId ||
+      req.body?.meta?.tenant_id ||
+      ""
+  );
 }
 
 export function internalOutboundRoutes() {
@@ -17,29 +48,72 @@ export function internalOutboundRoutes() {
 
   r.post("/internal/outbound/send", async (req, res) => {
     if (!requireInternalToken(req)) {
-      return res.status(401).json({ ok: false, error: "unauthorized" });
+      return res.status(401).json({
+        ok: false,
+        error: "unauthorized",
+      });
     }
 
-    const tenantKey = s(req.body?.tenantKey || "neox") || "neox";
-    const channel = s(req.body?.channel || "instagram").toLowerCase() || "instagram";
-    const threadId = s(req.body?.threadId || "");
-    const recipientId = s(req.body?.recipientId || "");
-    const text = s(req.body?.text || "");
-    const senderType = s(req.body?.senderType || "ai").toLowerCase() || "ai";
-    const messageType = s(req.body?.messageType || "text").toLowerCase() || "text";
+    const tenantKey = pickTenantKey(req);
+    const tenantId = pickTenantId(req);
+
+    const channel = lower(req.body?.channel || "instagram") || "instagram";
+    const threadId = s(req.body?.threadId || req.body?.thread_id);
+    const recipientId = s(req.body?.recipientId || req.body?.recipient_id);
+    const text = s(req.body?.text);
+    const senderType = lower(req.body?.senderType || req.body?.sender_type || "ai") || "ai";
+    const messageType = lower(req.body?.messageType || req.body?.message_type || "text") || "text";
     const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments : [];
-    const meta = req.body?.meta && typeof req.body.meta === "object" ? req.body.meta : {};
+    const meta = isObject(req.body?.meta) ? req.body.meta : {};
 
     if (!recipientId) {
-      return res.status(400).json({ ok: false, error: "recipientId required" });
+      return res.status(400).json({
+        ok: false,
+        error: "recipientId required",
+      });
     }
 
     if (!text && attachments.length === 0) {
-      return res.status(400).json({ ok: false, error: "text or attachments required" });
+      return res.status(400).json({
+        ok: false,
+        error: "text or attachments required",
+      });
     }
 
     try {
-      const { ok, results } = await executeMetaActions(
+      const actionMeta = {
+        ...meta,
+        tenantKey,
+        tenantId: tenantId || null,
+        threadId,
+        senderType,
+        messageType,
+        skipOutboundAck: true,
+        internalOutbound: true,
+        alreadyTrackedInAiHq: true,
+      };
+
+      const context = {
+        tenantKey,
+        tenantId: tenantId || null,
+        channel,
+        threadId,
+        recipientId,
+        userId: recipientId,
+        meta: {
+          ...meta,
+          tenantKey,
+          tenantId: tenantId || null,
+          threadId,
+          senderType,
+          messageType,
+          skipOutboundAck: true,
+          internalOutbound: true,
+          alreadyTrackedInAiHq: true,
+        },
+      };
+
+      const exec = await executeMetaActions(
         [
           {
             type: "send_message",
@@ -47,37 +121,19 @@ export function internalOutboundRoutes() {
             recipientId,
             text,
             attachments,
-            meta: {
-              ...meta,
-              tenantKey,
-              threadId,
-              senderType,
-              messageType,
-              skipOutboundAck: true,
-              internalOutbound: true,
-              alreadyTrackedInAiHq: true,
-            },
+            meta: actionMeta,
           },
         ],
-        {
-          tenantKey,
-          channel,
-          threadId,
-          recipientId,
-          userId: recipientId,
-          meta: {
-            ...meta,
-            skipOutboundAck: true,
-            internalOutbound: true,
-            alreadyTrackedInAiHq: true,
-          },
-        }
+        context
       );
 
-      const result = Array.isArray(results) ? results[0] || null : null;
+      const result = Array.isArray(exec?.results) ? exec.results[0] || null : null;
 
-      return res.status(ok ? 200 : 502).json({
-        ok,
+      return res.status(exec?.ok ? 200 : 502).json({
+        ok: Boolean(exec?.ok),
+        tenantKey,
+        tenantId: tenantId || null,
+        channel,
         result,
       });
     } catch (e) {
