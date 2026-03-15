@@ -19,6 +19,10 @@ function safeJsonPreview(v, limit = 220) {
   }
 }
 
+function normalizeObj(v) {
+  return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+}
+
 function logInfo(message, data = null) {
   try {
     if (data) console.log(`[meta-bot] ${message}`, data);
@@ -64,12 +68,90 @@ function summarizeExec(exec) {
   };
 }
 
+function buildCustomerContextFromEvent(ev) {
+  return {
+    fullName: s(ev?.customerName || ""),
+    username: s(ev?.username || ""),
+    externalUserId: s(ev?.userId || ""),
+    channel: s(ev?.channel || "instagram").toLowerCase() || "instagram",
+    pageId: s(ev?.pageId || ""),
+    igUserId: s(ev?.igUserId || ""),
+  };
+}
+
+function buildConversationContextFromEvent(ev) {
+  return {
+    eventType: s(ev?.eventType || ""),
+    sourceType: s(ev?.sourceType || ""),
+    externalThreadId: s(ev?.externalThreadId || ev?.userId || ""),
+    externalMessageId: s(ev?.messageId || ev?.mid || ""),
+    externalCommentId: s(ev?.externalCommentId || ""),
+    externalParentCommentId: s(ev?.externalParentCommentId || ""),
+    externalPostId: s(ev?.externalPostId || ""),
+    hasAttachments: Boolean(ev?.hasAttachments),
+    attachments: Array.isArray(ev?.attachments) ? ev.attachments : [],
+  };
+}
+
+function buildTenantContextFromResolved(tenantCtx) {
+  const tenant = normalizeObj(tenantCtx?.tenant);
+  const profile = normalizeObj(tenant?.profile);
+  const brand = normalizeObj(tenant?.brand);
+  const meta = normalizeObj(tenant?.meta);
+  const aiPolicy = normalizeObj(tenant?.ai_policy || tenant?.aiPolicy);
+  const channelConfig = normalizeObj(tenantCtx?.channelConfig);
+
+  return {
+    tenantKey: s(tenantCtx?.tenantKey || ""),
+    companyName:
+      s(brand?.displayName) ||
+      s(brand?.name) ||
+      s(profile?.companyName) ||
+      s(profile?.displayName) ||
+      s(tenant?.company_name) ||
+      s(tenant?.name) ||
+      s(tenantCtx?.tenantKey || ""),
+    industryKey:
+      s(profile?.industryKey) ||
+      s(profile?.industry_key) ||
+      s(tenant?.industry_key) ||
+      s(meta?.industry) ||
+      "generic_business",
+    defaultLanguage:
+      s(profile?.defaultLanguage) ||
+      s(profile?.default_language) ||
+      s(tenant?.default_language) ||
+      "az",
+    enabledLanguages:
+      Array.isArray(tenant?.enabled_languages)
+        ? tenant.enabled_languages
+        : Array.isArray(profile?.languages)
+          ? profile.languages
+          : [],
+    tone:
+      s(profile?.tone_of_voice) ||
+      s(meta?.tone) ||
+      "professional, concise, premium",
+    services:
+      Array.isArray(profile?.services)
+        ? profile.services
+        : Array.isArray(meta?.services)
+          ? meta.services
+          : [],
+    aiPolicy,
+    channelConfig,
+  };
+}
+
 function buildAihqInboxPayload(ev, rawBody, tenantCtx) {
   const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
   const externalUserId = s(ev?.userId || "");
   const externalMessageId = s(ev?.messageId || ev?.mid || "");
   const externalThreadId = s(ev?.externalThreadId || externalUserId || "");
   const text = s(ev?.text || "");
+  const customerContext = buildCustomerContextFromEvent(ev);
+  const conversationContext = buildConversationContextFromEvent(ev);
+  const tenantContext = buildTenantContextFromResolved(tenantCtx);
 
   return {
     tenantKey: s(tenantCtx?.tenantKey || ""),
@@ -85,6 +167,11 @@ function buildAihqInboxPayload(ev, rawBody, tenantCtx) {
     text,
     timestamp: Number(ev?.timestamp || Date.now()),
     raw: rawBody,
+    customerContext,
+    formData: {},
+    leadContext: {},
+    conversationContext,
+    tenantContext,
     metaAccount: {
       recipientId: s(ev?.recipientId || ""),
       pageId: s(ev?.pageId || ""),
@@ -95,6 +182,9 @@ function buildAihqInboxPayload(ev, rawBody, tenantCtx) {
 
 function buildAihqCommentPayload(ev, rawBody, tenantCtx) {
   const channel = s(ev?.channel || "instagram").toLowerCase() || "instagram";
+  const customerContext = buildCustomerContextFromEvent(ev);
+  const conversationContext = buildConversationContextFromEvent(ev);
+  const tenantContext = buildTenantContextFromResolved(tenantCtx);
 
   return {
     tenantKey: s(tenantCtx?.tenantKey || ""),
@@ -114,6 +204,13 @@ function buildAihqCommentPayload(ev, rawBody, tenantCtx) {
     text: s(ev?.text || ""),
     timestamp: Number(ev?.timestamp || Date.now()),
     raw: rawBody,
+
+    customerContext,
+    formData: {},
+    leadContext: {},
+    conversationContext,
+    tenantContext,
+
     metaAccount: {
       recipientId: s(ev?.recipientId || ""),
       pageId: s(ev?.pageId || ""),
@@ -289,7 +386,34 @@ async function handleSupportedCommentEvent(ev, rawBody) {
       status: Number(out?.status || 0),
       tenantKey: resolvedTenantKey,
     });
+    return;
   }
+
+  const actions = Array.isArray(out?.json?.actions) ? out.json.actions : [];
+
+  if (!actions.length) {
+    logInfo("no actions returned from AI HQ for comment", {
+      classification: s(out?.json?.classification?.category || ""),
+      commentId: s(out?.json?.comment?.id || ""),
+      tenantKey: resolvedTenantKey,
+    });
+    return;
+  }
+
+  const exec = await executeMetaActions(actions, {
+    channel: s(ev?.channel || "instagram").toLowerCase() || "instagram",
+    userId: s(ev?.userId || ""),
+    recipientId: s(ev?.userId || ""),
+    tenantKey: resolvedTenantKey,
+    threadId: s(out?.json?.thread?.id || ""),
+    externalCommentId: s(ev?.externalCommentId || ""),
+    externalPostId: s(ev?.externalPostId || ""),
+  });
+
+  logInfo("comment action execution summary", {
+    tenantKey: resolvedTenantKey,
+    ...summarizeExec(exec),
+  });
 }
 
 export function registerWebhookRoutes(app) {
