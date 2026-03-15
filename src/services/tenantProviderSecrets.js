@@ -68,6 +68,20 @@ function pickSecretValue(rows, ...keys) {
   return "";
 }
 
+function logInfo(message, data = null) {
+  try {
+    if (data) console.log(`[meta-bot] ${message}`, data);
+    else console.log(`[meta-bot] ${message}`);
+  } catch {}
+}
+
+function logWarn(message, data = null) {
+  try {
+    if (data) console.warn(`[meta-bot] ${message}`, data);
+    else console.warn(`[meta-bot] ${message}`);
+  } catch {}
+}
+
 async function resolveMetaChannelConfig({
   channel = "instagram",
   recipientId = "",
@@ -112,21 +126,39 @@ async function resolveMetaChannelConfig({
   if (safeIgUserId) qs.set("igUserId", safeIgUserId);
 
   const url = `${base}/api/tenants/resolve-channel?${qs.toString()}`;
+  const timeoutMs = Number(AIHQ_TIMEOUT_MS || 20000);
+
+  logInfo("tenant secret resolve request", {
+    base,
+    url,
+    timeoutMs,
+    hasInternalToken: Boolean(s(AIHQ_INTERNAL_TOKEN)),
+  });
 
   const controller = new AbortController();
-  const timer = setTimeout(
-    () => controller.abort(),
-    Number(AIHQ_TIMEOUT_MS || 15000)
-  );
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    const startedAt = Date.now();
+
     const res = await fetch(url, {
       method: "GET",
       headers: buildHeaders(),
       signal: controller.signal,
     });
 
+    const tookMs = Date.now() - startedAt;
     const json = await safeReadJson(res);
+
+    logInfo("tenant secret resolve response", {
+      status: res.status,
+      ok: res.ok,
+      tookMs,
+      preview:
+        json && typeof json === "object"
+          ? JSON.stringify(json).slice(0, 280)
+          : "",
+    });
 
     if (!res.ok || json?.ok === false) {
       return {
@@ -153,13 +185,23 @@ async function resolveMetaChannelConfig({
       json,
     };
   } catch (err) {
+    const error =
+      err?.name === "AbortError"
+        ? "resolve-channel timeout"
+        : String(err?.message || err);
+
+    logWarn("tenant secret resolve failed", {
+      error,
+      base,
+      url,
+      timeoutMs,
+      hasInternalToken: Boolean(s(AIHQ_INTERNAL_TOKEN)),
+    });
+
     return {
       ok: false,
       status: 0,
-      error:
-        err?.name === "AbortError"
-          ? "resolve-channel timeout"
-          : String(err?.message || err),
+      error,
       tenantKey: "",
       tenant: null,
       channelConfig: null,
@@ -170,19 +212,7 @@ async function resolveMetaChannelConfig({
   }
 }
 
-export async function getTenantMetaConfigByChannel({
-  channel = "instagram",
-  recipientId = "",
-  pageId = "",
-  igUserId = "",
-}) {
-  const out = await resolveMetaChannelConfig({
-    channel,
-    recipientId,
-    pageId,
-    igUserId,
-  });
-
+function mapResolveOutput(out) {
   const cfg =
     out?.channelConfig && typeof out.channelConfig === "object"
       ? out.channelConfig
@@ -205,19 +235,21 @@ export async function getTenantMetaConfigByChannel({
     )
   );
 
-  const pageIdFinal = firstNonEmpty(
+  const pageId = firstNonEmpty(
     cfg?.pageId,
     cfg?.page_id,
     meta?.pageId,
     meta?.page_id,
+    cfg?.external_page_id,
     pickSecretValue(secrets, "page_id", "meta_page_id", "instagram_page_id")
   );
 
-  const igUserIdFinal = firstNonEmpty(
+  const igUserId = firstNonEmpty(
     cfg?.igUserId,
     cfg?.ig_user_id,
     cfg?.instagramBusinessAccountId,
     cfg?.instagram_business_account_id,
+    cfg?.external_user_id,
     meta?.igUserId,
     meta?.ig_user_id,
     meta?.instagramBusinessAccountId,
@@ -241,8 +273,8 @@ export async function getTenantMetaConfigByChannel({
   return {
     tenantKey: out?.tenantKey || "",
     pageAccessToken,
-    pageId: pageIdFinal,
-    igUserId: igUserIdFinal,
+    pageId,
+    igUserId,
     appSecret,
     source: out?.ok ? "resolve_channel" : "none",
     error: out?.ok
@@ -253,5 +285,53 @@ export async function getTenantMetaConfigByChannel({
     status: Number(out?.status || 0),
     channelConfig: cfg || null,
     tenant: out?.tenant || null,
+  };
+}
+
+export async function getTenantMetaConfigByChannel({
+  channel = "instagram",
+  recipientId = "",
+  pageId = "",
+  igUserId = "",
+}) {
+  const out = await resolveMetaChannelConfig({
+    channel,
+    recipientId,
+    pageId,
+    igUserId,
+  });
+
+  return mapResolveOutput(out);
+}
+
+/*
+  Backward-compatible export so existing metaSend.js does not crash.
+  If only tenantKey is passed, we cannot resolve by tenantKey through resolve-channel,
+  so this returns a clear error instead of crashing the app.
+*/
+export async function getTenantMetaConfig(tenantKeyOrInput) {
+  if (
+    tenantKeyOrInput &&
+    typeof tenantKeyOrInput === "object" &&
+    !Array.isArray(tenantKeyOrInput)
+  ) {
+    return getTenantMetaConfigByChannel(tenantKeyOrInput);
+  }
+
+  const tenantKey = lower(tenantKeyOrInput);
+
+  return {
+    tenantKey,
+    pageAccessToken: "",
+    pageId: "",
+    igUserId: "",
+    appSecret: "",
+    source: "none",
+    error: tenantKey
+      ? "tenantKey-only resolve is no longer supported here; use channel ids"
+      : "tenantKey missing",
+    status: 0,
+    channelConfig: null,
+    tenant: null,
   };
 }
