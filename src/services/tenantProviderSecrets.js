@@ -1,9 +1,4 @@
-import {
-  AIHQ_BASE_URL,
-  AIHQ_INTERNAL_TOKEN,
-  AIHQ_TIMEOUT_MS,
-  AIHQ_SECRETS_PATH,
-} from "../config.js";
+import { AIHQ_BASE_URL, AIHQ_INTERNAL_TOKEN, AIHQ_TIMEOUT_MS } from "../config.js";
 
 function s(v) {
   return String(v ?? "").trim();
@@ -28,30 +23,82 @@ async function safeReadJson(res) {
   }
 }
 
-function buildSecretsUrl(provider, tenantKey) {
-  const base = trimSlash(AIHQ_BASE_URL);
-  const path = s(AIHQ_SECRETS_PATH || "/api/settings/secrets");
-  const safeProvider = encodeURIComponent(lower(provider));
-  const safeTenantKey = encodeURIComponent(lower(tenantKey));
-
-  if (!base) return "";
-
-  const safePath = path.startsWith("/") ? path : `/${path}`;
-  return `${base}${safePath}?provider=${safeProvider}&tenantKey=${safeTenantKey}`;
+function buildHeaders() {
+  return {
+    Accept: "application/json",
+    ...(s(AIHQ_INTERNAL_TOKEN)
+      ? { "x-internal-token": s(AIHQ_INTERNAL_TOKEN) }
+      : {}),
+  };
 }
 
-async function fetchTenantSecrets(provider, tenantKey) {
-  const url = buildSecretsUrl(provider, tenantKey);
+function firstNonEmpty(...vals) {
+  for (const v of vals) {
+    const x = s(v);
+    if (x) return x;
+  }
+  return "";
+}
 
-  if (!url) {
+function normalizeSecretRows(json) {
+  if (Array.isArray(json?.secrets)) return json.secrets;
+  if (Array.isArray(json?.items)) return json.items;
+  if (Array.isArray(json?.rows)) return json.rows;
+  return [];
+}
+
+function pickSecretValue(rows, ...keys) {
+  const wanted = keys.map((k) => lower(k)).filter(Boolean);
+
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const secretKey = lower(
+      row?.secret_key || row?.key || row?.name || row?.slug || ""
+    );
+
+    if (wanted.includes(secretKey)) {
+      return firstNonEmpty(
+        row?.value,
+        row?.secret_value,
+        row?.decrypted_value,
+        row?.plain_value
+      );
+    }
+  }
+
+  return "";
+}
+
+async function resolveMetaChannelConfigByTenant(tenantKey) {
+  const base = trimSlash(AIHQ_BASE_URL);
+  const safeTenantKey = lower(tenantKey);
+
+  if (!base) {
     return {
       ok: false,
-      error: "AIHQ_BASE_URL missing",
-      secrets: [],
       status: 0,
+      error: "AIHQ_BASE_URL missing",
+      tenantKey: safeTenantKey,
+      tenant: null,
+      channelConfig: null,
       json: null,
     };
   }
+
+  if (!safeTenantKey) {
+    return {
+      ok: false,
+      status: 0,
+      error: "tenantKey missing",
+      tenantKey: "",
+      tenant: null,
+      channelConfig: null,
+      json: null,
+    };
+  }
+
+  const url = `${base}/api/tenants/resolve-channel?channel=instagram&tenantKey=${encodeURIComponent(
+    safeTenantKey
+  )}`;
 
   const controller = new AbortController();
   const timer = setTimeout(
@@ -62,12 +109,7 @@ async function fetchTenantSecrets(provider, tenantKey) {
   try {
     const res = await fetch(url, {
       method: "GET",
-      headers: {
-        Accept: "application/json",
-        ...(s(AIHQ_INTERNAL_TOKEN)
-          ? { "x-internal-token": s(AIHQ_INTERNAL_TOKEN) }
-          : {}),
-      },
+      headers: buildHeaders(),
       signal: controller.signal,
     });
 
@@ -76,50 +118,43 @@ async function fetchTenantSecrets(provider, tenantKey) {
     if (!res.ok || json?.ok === false) {
       return {
         ok: false,
+        status: res.status,
         error:
           json?.error ||
           json?.message ||
-          `AI HQ secrets fetch failed (${res.status})`,
-        secrets: [],
-        status: res.status,
+          `resolve-channel failed (${res.status})`,
+        tenantKey: safeTenantKey,
+        tenant: null,
+        channelConfig: null,
         json,
       };
     }
 
     return {
       ok: true,
-      error: null,
-      secrets: Array.isArray(json?.secrets) ? json.secrets : [],
       status: res.status,
+      error: null,
+      tenantKey: lower(json?.tenantKey || json?.tenant?.tenant_key || safeTenantKey),
+      tenant: json?.tenant || null,
+      channelConfig: json?.channelConfig || null,
       json,
     };
   } catch (err) {
     return {
       ok: false,
+      status: 0,
       error:
         err?.name === "AbortError"
-          ? "AI HQ secrets timeout"
+          ? "resolve-channel timeout"
           : String(err?.message || err),
-      secrets: [],
-      status: 0,
+      tenantKey: safeTenantKey,
+      tenant: null,
+      channelConfig: null,
       json: null,
     };
   } finally {
     clearTimeout(timer);
   }
-}
-
-function pickSecretValue(rows, key) {
-  const wanted = lower(key);
-
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const secretKey = lower(row?.secret_key || row?.key || "");
-    if (secretKey === wanted) {
-      return s(row?.value || "");
-    }
-  }
-
-  return "";
 }
 
 export async function getTenantMetaConfig(tenantKey) {
@@ -135,20 +170,80 @@ export async function getTenantMetaConfig(tenantKey) {
       source: "none",
       error: "tenantKey missing",
       status: 0,
+      channelConfig: null,
+      tenant: null,
     };
   }
 
-  const out = await fetchTenantSecrets("meta", safeTenantKey);
-  const rows = Array.isArray(out?.secrets) ? out.secrets : [];
+  const out = await resolveMetaChannelConfigByTenant(safeTenantKey);
+  const cfg = out?.channelConfig && typeof out.channelConfig === "object"
+    ? out.channelConfig
+    : {};
+
+  const meta = cfg?.meta && typeof cfg.meta === "object" ? cfg.meta : {};
+  const secrets = normalizeSecretRows(out?.json);
+
+  const pageAccessToken = firstNonEmpty(
+    cfg?.pageAccessToken,
+    cfg?.page_access_token,
+    meta?.pageAccessToken,
+    meta?.page_access_token,
+    pickSecretValue(
+      secrets,
+      "page_access_token",
+      "access_token",
+      "meta_page_access_token",
+      "instagram_page_access_token"
+    )
+  );
+
+  const pageId = firstNonEmpty(
+    cfg?.pageId,
+    cfg?.page_id,
+    meta?.pageId,
+    meta?.page_id,
+    pickSecretValue(secrets, "page_id", "meta_page_id", "instagram_page_id")
+  );
+
+  const igUserId = firstNonEmpty(
+    cfg?.igUserId,
+    cfg?.ig_user_id,
+    cfg?.instagramBusinessAccountId,
+    cfg?.instagram_business_account_id,
+    meta?.igUserId,
+    meta?.ig_user_id,
+    meta?.instagramBusinessAccountId,
+    meta?.instagram_business_account_id,
+    pickSecretValue(
+      secrets,
+      "ig_user_id",
+      "instagram_business_account_id",
+      "instagram_user_id"
+    )
+  );
+
+  const appSecret = firstNonEmpty(
+    cfg?.appSecret,
+    cfg?.app_secret,
+    meta?.appSecret,
+    meta?.app_secret,
+    pickSecretValue(secrets, "app_secret", "meta_app_secret")
+  );
 
   return {
     tenantKey: safeTenantKey,
-    pageAccessToken: pickSecretValue(rows, "page_access_token"),
-    pageId: pickSecretValue(rows, "page_id"),
-    igUserId: pickSecretValue(rows, "ig_user_id"),
-    appSecret: pickSecretValue(rows, "app_secret"),
-    source: out?.ok ? "aihq" : "none",
-    error: out?.ok ? null : out?.error || null,
+    pageAccessToken,
+    pageId,
+    igUserId,
+    appSecret,
+    source: out?.ok ? "resolve_channel" : "none",
+    error: out?.ok
+      ? pageAccessToken
+        ? null
+        : "tenant meta token not found in channelConfig"
+      : out?.error || null,
     status: Number(out?.status || 0),
+    channelConfig: cfg || null,
+    tenant: out?.tenant || null,
   };
 }
