@@ -4,7 +4,9 @@ import {
   sendInstagramTypingOn,
   sendInstagramTypingOff,
   sendInstagramCommentReply,
+  sendInstagramPrivateCommentReply,
   sendFacebookCommentReply,
+  sendFacebookPrivateCommentReply,
 } from "./metaSend.js";
 import { notifyAiHqOutbound } from "./aihqOutboundClient.js";
 
@@ -123,7 +125,7 @@ function needsRecipient(type) {
 }
 
 function needsCommentId(type) {
-  return ["reply_comment"].includes(type);
+  return ["reply_comment", "private_reply_comment"].includes(type);
 }
 
 function shouldSkipOutboundAck(action, ctx = {}) {
@@ -153,9 +155,12 @@ function getChannelCapabilities(channel) {
       typingOn: sendInstagramTypingOn,
       typingOff: sendInstagramTypingOff,
       replyComment: sendInstagramCommentReply,
+      privateReplyComment: sendInstagramPrivateCommentReply,
       supportsSeen: true,
       supportsTyping: true,
       supportsCommentReply: typeof sendInstagramCommentReply === "function",
+      supportsPrivateCommentReply:
+        typeof sendInstagramPrivateCommentReply === "function",
     };
   }
 
@@ -167,9 +172,12 @@ function getChannelCapabilities(channel) {
       typingOn: null,
       typingOff: null,
       replyComment: sendFacebookCommentReply,
+      privateReplyComment: sendFacebookPrivateCommentReply,
       supportsSeen: false,
       supportsTyping: false,
       supportsCommentReply: typeof sendFacebookCommentReply === "function",
+      supportsPrivateCommentReply:
+        typeof sendFacebookPrivateCommentReply === "function",
     };
   }
 
@@ -180,9 +188,11 @@ function getChannelCapabilities(channel) {
     typingOn: null,
     typingOff: null,
     replyComment: null,
+    privateReplyComment: null,
     supportsSeen: false,
     supportsTyping: false,
     supportsCommentReply: false,
+    supportsPrivateCommentReply: false,
   };
 }
 
@@ -320,12 +330,20 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
   };
 }
 
-async function runReplyComment({ action, ctx, channel, commentId, meta, sender }) {
+async function runReplyComment({
+  action,
+  ctx,
+  channel,
+  commentId,
+  meta,
+  sender,
+  actionType = "reply_comment",
+}) {
   const text = s(action?.text || action?.replyText);
 
   if (!text) {
     return failResult({
-      type: "reply_comment",
+      type: actionType,
       channel,
       error: "reply text missing",
       meta,
@@ -334,7 +352,7 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
 
   if (!commentId) {
     return failResult({
-      type: "reply_comment",
+      type: actionType,
       channel,
       error: "commentId missing",
       meta,
@@ -343,9 +361,12 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
 
   if (typeof sender !== "function") {
     return failResult({
-      type: "reply_comment",
+      type: actionType,
       channel,
-      error: "comment reply not supported for channel",
+      error:
+        actionType === "private_reply_comment"
+          ? "private comment reply not supported for channel"
+          : "comment reply not supported for channel",
       meta,
     });
   }
@@ -362,15 +383,15 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
   });
 
   if (!out.ok) {
-    logWarn("reply_comment failed", {
+    logWarn(`${actionType} failed`, {
       channel,
       commentId,
       tenantKey,
-      error: s(out?.error || "unknown comment reply error"),
+      error: s(out?.error || `unknown ${actionType} error`),
       status: Number(out?.status || 0),
     });
   } else {
-    logInfo("reply_comment success", {
+    logInfo(`${actionType} success`, {
       channel,
       commentId,
       tenantKey,
@@ -378,13 +399,14 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
         out?.json?.id ||
           out?.json?.comment_id ||
           out?.json?.reply_id ||
+          out?.json?.message_id ||
           ""
       ),
     });
   }
 
   return {
-    type: "reply_comment",
+    type: actionType,
     channel,
     ok: Boolean(out.ok),
     status: Number(out.status || 0),
@@ -394,6 +416,7 @@ async function runReplyComment({ action, ctx, channel, commentId, meta, sender }
       tenantKey,
       tenantId,
       externalCommentId: commentId,
+      privateReply: actionType === "private_reply_comment",
     },
     response: out.json || null,
   };
@@ -626,6 +649,34 @@ export async function executeMetaActions(actions, ctx = {}) {
           commentId,
           meta,
           sender: caps.replyComment,
+          actionType: "reply_comment",
+        })
+      );
+      continue;
+    }
+
+    if (type === "private_reply_comment") {
+      if (!caps.supportsPrivateCommentReply || !caps.privateReplyComment) {
+        results.push(
+          failResult({
+            type,
+            channel,
+            error: "private comment reply not supported for channel",
+            meta,
+          })
+        );
+        continue;
+      }
+
+      results.push(
+        await runReplyComment({
+          action,
+          ctx,
+          channel,
+          commentId,
+          meta,
+          sender: caps.privateReplyComment,
+          actionType: "private_reply_comment",
         })
       );
       continue;

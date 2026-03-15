@@ -43,6 +43,35 @@ function pickTenantId(req) {
   );
 }
 
+function normalizeActions(v) {
+  return Array.isArray(v) ? v : [];
+}
+
+function normalizeContext(req, tenantKey, tenantId) {
+  const body = isObject(req.body) ? req.body : {};
+  const context = isObject(body.context) ? body.context : {};
+  const meta = isObject(context.meta) ? context.meta : {};
+
+  return {
+    tenantKey,
+    tenantId: tenantId || null,
+    channel: lower(context.channel || body.channel || "instagram") || "instagram",
+    threadId: s(context.threadId || context.thread_id || body.threadId || body.thread_id || ""),
+    recipientId: s(
+      context.recipientId || context.recipient_id || body.recipientId || body.recipient_id || ""
+    ),
+    userId: s(context.userId || context.user_id || body.userId || body.user_id || ""),
+    commentId: s(context.commentId || context.comment_id || ""),
+    externalCommentId: s(context.externalCommentId || context.external_comment_id || ""),
+    externalPostId: s(context.externalPostId || context.external_post_id || ""),
+    meta: {
+      ...meta,
+      tenantKey,
+      tenantId: tenantId || null,
+    },
+  };
+}
+
 export function internalOutboundRoutes() {
   const r = express.Router();
 
@@ -135,6 +164,44 @@ export function internalOutboundRoutes() {
         tenantId: tenantId || null,
         channel,
         result,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: String(e?.message || e),
+      });
+    }
+  });
+
+  r.post("/internal/comment-actions/execute", async (req, res) => {
+    if (!requireInternalToken(req)) {
+      return res.status(401).json({
+        ok: false,
+        error: "unauthorized",
+      });
+    }
+
+    const tenantKey = pickTenantKey(req);
+    const tenantId = pickTenantId(req);
+    const actions = normalizeActions(req.body?.actions);
+    const context = normalizeContext(req, tenantKey, tenantId);
+
+    if (!actions.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "actions required",
+      });
+    }
+
+    try {
+      const exec = await executeMetaActions(actions, context);
+
+      return res.status(exec?.ok ? 200 : 502).json({
+        ok: Boolean(exec?.ok),
+        tenantKey,
+        tenantId: tenantId || null,
+        context,
+        results: Array.isArray(exec?.results) ? exec.results : [],
       });
     } catch (e) {
       return res.status(500).json({

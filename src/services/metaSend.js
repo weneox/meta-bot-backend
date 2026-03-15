@@ -278,6 +278,24 @@ async function sendSenderAction({ recipientId, action, tenantKey = "" }) {
   );
 }
 
+async function sendPrivateCommentReply({
+  commentId,
+  text,
+  tenantKey = "",
+}) {
+  const comment = requireCommentId(commentId);
+  if (!comment.ok) return fail(comment.error);
+
+  const bodyText = s(text);
+  if (!bodyText) return fail("text missing");
+
+  return postForm(
+    graphNodeEndpoint(comment.value, "private_replies"),
+    { message: bodyText },
+    { tenantKey }
+  );
+}
+
 export async function sendInstagramTextMessage({
   recipientId,
   text,
@@ -342,6 +360,18 @@ export async function sendInstagramCommentReply({
   );
 }
 
+export async function sendInstagramPrivateCommentReply({
+  commentId,
+  text,
+  tenantKey = "",
+}) {
+  return sendPrivateCommentReply({
+    commentId,
+    text,
+    tenantKey,
+  });
+}
+
 export async function sendFacebookCommentReply({
   commentId,
   text,
@@ -358,4 +388,16 @@ export async function sendFacebookCommentReply({
     { message: bodyText },
     { tenantKey }
   );
+}
+
+export async function sendFacebookPrivateCommentReply({
+  commentId,
+  text,
+  tenantKey = "",
+}) {
+  return sendPrivateCommentReply({
+    commentId,
+    text,
+    tenantKey,
+  });
 }
