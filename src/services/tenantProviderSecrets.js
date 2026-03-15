@@ -55,14 +55,16 @@ function pickSecretValue(rows, ...keys) {
       row?.secret_key || row?.key || row?.name || row?.slug || ""
     );
 
-    if (wanted.includes(secretKey)) {
-      return firstNonEmpty(
-        row?.value,
-        row?.secret_value,
-        row?.decrypted_value,
-        row?.plain_value
-      );
-    }
+    if (!wanted.includes(secretKey)) continue;
+
+    const val = firstNonEmpty(
+      row?.value,
+      row?.secret_value,
+      row?.decrypted_value,
+      row?.plain_value
+    );
+
+    if (val) return val;
   }
 
   return "";
@@ -156,8 +158,11 @@ async function resolveMetaChannelConfig({
       tookMs,
       preview:
         json && typeof json === "object"
-          ? JSON.stringify(json).slice(0, 280)
+          ? JSON.stringify(json).slice(0, 500)
           : "",
+      secretKeys: Array.isArray(json?.secrets)
+        ? json.secrets.map((x) => x?.secret_key || x?.key || "")
+        : [],
     });
 
     if (!res.ok || json?.ok === false) {
@@ -270,6 +275,22 @@ function mapResolveOutput(out) {
     pickSecretValue(secrets, "app_secret", "meta_app_secret")
   );
 
+  const error = out?.ok
+    ? pageAccessToken
+      ? null
+      : "tenant meta token not found in resolve-channel response"
+    : out?.error || null;
+
+  logInfo("resolved tenant meta config", {
+    tenantKey: out?.tenantKey || "",
+    hasPageAccessToken: Boolean(pageAccessToken),
+    pageId,
+    igUserId,
+    secretKeys: secrets.map((x) => x?.secret_key || x?.key || ""),
+    error,
+    status: Number(out?.status || 0),
+  });
+
   return {
     tenantKey: out?.tenantKey || "",
     pageAccessToken,
@@ -277,11 +298,7 @@ function mapResolveOutput(out) {
     igUserId,
     appSecret,
     source: out?.ok ? "resolve_channel" : "none",
-    error: out?.ok
-      ? pageAccessToken
-        ? null
-        : "tenant meta token not found in channelConfig"
-      : out?.error || null,
+    error,
     status: Number(out?.status || 0),
     channelConfig: cfg || null,
     tenant: out?.tenant || null,
@@ -304,11 +321,6 @@ export async function getTenantMetaConfigByChannel({
   return mapResolveOutput(out);
 }
 
-/*
-  Backward-compatible export so existing metaSend.js does not crash.
-  If only tenantKey is passed, we cannot resolve by tenantKey through resolve-channel,
-  so this returns a clear error instead of crashing the app.
-*/
 export async function getTenantMetaConfig(tenantKeyOrInput) {
   if (
     tenantKeyOrInput &&
