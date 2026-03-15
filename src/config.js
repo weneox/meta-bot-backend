@@ -29,7 +29,7 @@ export const PUBLIC_BASE_URL = s(process.env.PUBLIC_BASE_URL, "").replace(/\/+$/
 // --------------------------------------------------
 export const AIHQ_BASE_URL = s(process.env.AIHQ_BASE_URL, "").replace(/\/+$/, "");
 export const AIHQ_INTERNAL_TOKEN = s(process.env.AIHQ_INTERNAL_TOKEN, "");
-export const AIHQ_TIMEOUT_MS = n(process.env.AIHQ_TIMEOUT_MS, 8000);
+export const AIHQ_TIMEOUT_MS = n(process.env.AIHQ_TIMEOUT_MS, 20000);
 export const AIHQ_SECRETS_PATH = s(
   process.env.AIHQ_SECRETS_PATH,
   "/api/settings/secrets"
@@ -42,7 +42,7 @@ export const AIHQ_SECRETS_PATH = s(
 // --------------------------------------------------
 export const META_PAGE_ACCESS_TOKEN = s(process.env.META_PAGE_ACCESS_TOKEN, "");
 export const META_API_VERSION = s(process.env.META_API_VERSION, "v23.0");
-export const META_REPLY_TIMEOUT_MS = n(process.env.META_REPLY_TIMEOUT_MS, 8000);
+export const META_REPLY_TIMEOUT_MS = n(process.env.META_REPLY_TIMEOUT_MS, 15000);
 export const META_TOKEN_FALLBACK_ENABLED = b(
   process.env.META_TOKEN_FALLBACK_ENABLED,
   true

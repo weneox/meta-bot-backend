@@ -68,27 +68,19 @@ function pickSecretValue(rows, ...keys) {
   return "";
 }
 
-async function resolveMetaChannelConfigByTenant(tenantKey) {
+async function resolveMetaChannelConfig({
+  channel = "instagram",
+  recipientId = "",
+  pageId = "",
+  igUserId = "",
+}) {
   const base = trimSlash(AIHQ_BASE_URL);
-  const safeTenantKey = lower(tenantKey);
 
   if (!base) {
     return {
       ok: false,
       status: 0,
       error: "AIHQ_BASE_URL missing",
-      tenantKey: safeTenantKey,
-      tenant: null,
-      channelConfig: null,
-      json: null,
-    };
-  }
-
-  if (!safeTenantKey) {
-    return {
-      ok: false,
-      status: 0,
-      error: "tenantKey missing",
       tenantKey: "",
       tenant: null,
       channelConfig: null,
@@ -96,14 +88,35 @@ async function resolveMetaChannelConfigByTenant(tenantKey) {
     };
   }
 
-  const url = `${base}/api/tenants/resolve-channel?channel=instagram&tenantKey=${encodeURIComponent(
-    safeTenantKey
-  )}`;
+  const safeChannel = lower(channel || "instagram");
+  const safeRecipientId = s(recipientId);
+  const safePageId = s(pageId);
+  const safeIgUserId = s(igUserId);
+
+  if (!safeRecipientId && !safePageId && !safeIgUserId) {
+    return {
+      ok: false,
+      status: 0,
+      error: "recipientId or pageId or igUserId is required",
+      tenantKey: "",
+      tenant: null,
+      channelConfig: null,
+      json: null,
+    };
+  }
+
+  const qs = new URLSearchParams();
+  qs.set("channel", safeChannel);
+  if (safeRecipientId) qs.set("recipientId", safeRecipientId);
+  if (safePageId) qs.set("pageId", safePageId);
+  if (safeIgUserId) qs.set("igUserId", safeIgUserId);
+
+  const url = `${base}/api/tenants/resolve-channel?${qs.toString()}`;
 
   const controller = new AbortController();
   const timer = setTimeout(
     () => controller.abort(),
-    Number(AIHQ_TIMEOUT_MS || 8000)
+    Number(AIHQ_TIMEOUT_MS || 15000)
   );
 
   try {
@@ -123,7 +136,7 @@ async function resolveMetaChannelConfigByTenant(tenantKey) {
           json?.error ||
           json?.message ||
           `resolve-channel failed (${res.status})`,
-        tenantKey: safeTenantKey,
+        tenantKey: "",
         tenant: null,
         channelConfig: null,
         json,
@@ -134,7 +147,7 @@ async function resolveMetaChannelConfigByTenant(tenantKey) {
       ok: true,
       status: res.status,
       error: null,
-      tenantKey: lower(json?.tenantKey || json?.tenant?.tenant_key || safeTenantKey),
+      tenantKey: lower(json?.tenantKey || json?.tenant?.tenant_key || ""),
       tenant: json?.tenant || null,
       channelConfig: json?.channelConfig || null,
       json,
@@ -147,7 +160,7 @@ async function resolveMetaChannelConfigByTenant(tenantKey) {
         err?.name === "AbortError"
           ? "resolve-channel timeout"
           : String(err?.message || err),
-      tenantKey: safeTenantKey,
+      tenantKey: "",
       tenant: null,
       channelConfig: null,
       json: null,
@@ -157,28 +170,23 @@ async function resolveMetaChannelConfigByTenant(tenantKey) {
   }
 }
 
-export async function getTenantMetaConfig(tenantKey) {
-  const safeTenantKey = lower(tenantKey);
+export async function getTenantMetaConfigByChannel({
+  channel = "instagram",
+  recipientId = "",
+  pageId = "",
+  igUserId = "",
+}) {
+  const out = await resolveMetaChannelConfig({
+    channel,
+    recipientId,
+    pageId,
+    igUserId,
+  });
 
-  if (!safeTenantKey) {
-    return {
-      tenantKey: "",
-      pageAccessToken: "",
-      pageId: "",
-      igUserId: "",
-      appSecret: "",
-      source: "none",
-      error: "tenantKey missing",
-      status: 0,
-      channelConfig: null,
-      tenant: null,
-    };
-  }
-
-  const out = await resolveMetaChannelConfigByTenant(safeTenantKey);
-  const cfg = out?.channelConfig && typeof out.channelConfig === "object"
-    ? out.channelConfig
-    : {};
+  const cfg =
+    out?.channelConfig && typeof out.channelConfig === "object"
+      ? out.channelConfig
+      : {};
 
   const meta = cfg?.meta && typeof cfg.meta === "object" ? cfg.meta : {};
   const secrets = normalizeSecretRows(out?.json);
@@ -197,7 +205,7 @@ export async function getTenantMetaConfig(tenantKey) {
     )
   );
 
-  const pageId = firstNonEmpty(
+  const pageIdFinal = firstNonEmpty(
     cfg?.pageId,
     cfg?.page_id,
     meta?.pageId,
@@ -205,7 +213,7 @@ export async function getTenantMetaConfig(tenantKey) {
     pickSecretValue(secrets, "page_id", "meta_page_id", "instagram_page_id")
   );
 
-  const igUserId = firstNonEmpty(
+  const igUserIdFinal = firstNonEmpty(
     cfg?.igUserId,
     cfg?.ig_user_id,
     cfg?.instagramBusinessAccountId,
@@ -231,10 +239,10 @@ export async function getTenantMetaConfig(tenantKey) {
   );
 
   return {
-    tenantKey: safeTenantKey,
+    tenantKey: out?.tenantKey || "",
     pageAccessToken,
-    pageId,
-    igUserId,
+    pageId: pageIdFinal,
+    igUserId: igUserIdFinal,
     appSecret,
     source: out?.ok ? "resolve_channel" : "none",
     error: out?.ok
