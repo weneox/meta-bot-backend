@@ -4,7 +4,7 @@ import {
   META_REPLY_TIMEOUT_MS,
   META_TOKEN_FALLBACK_ENABLED,
 } from "../config.js";
-import { getTenantMetaConfig } from "./tenantProviderSecrets.js";
+import { getTenantMetaConfigByChannel } from "./tenantProviderSecrets.js";
 
 function s(v) {
   return String(v ?? "").trim();
@@ -22,6 +22,20 @@ function fail(error, status = 0, json = null, meta = null) {
     json,
     meta,
   };
+}
+
+function logInfo(message, data = null) {
+  try {
+    if (data) console.log(`[meta-bot] ${message}`, data);
+    else console.log(`[meta-bot] ${message}`);
+  } catch {}
+}
+
+function logWarn(message, data = null) {
+  try {
+    if (data) console.warn(`[meta-bot] ${message}`, data);
+    else console.warn(`[meta-bot] ${message}`);
+  } catch {}
 }
 
 async function safeReadJson(res) {
@@ -50,44 +64,126 @@ function graphNodeEndpoint(nodeId, edge = "") {
   return cleanEdge ? `${graphBase()}/${id}/${cleanEdge}` : `${graphBase()}/${id}`;
 }
 
-async function resolveMetaAccessToken({ tenantKey = "" } = {}) {
+function firstNonEmpty(...vals) {
+  for (const v of vals) {
+    const x = s(v);
+    if (x) return x;
+  }
+  return "";
+}
+
+async function resolveMetaAccessToken({
+  tenantKey = "",
+  channel = "instagram",
+  recipientId = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
+} = {}) {
   const envToken = s(META_PAGE_ACCESS_TOKEN);
   const safeTenantKey = lower(tenantKey);
   const allowEnvFallback = Boolean(META_TOKEN_FALLBACK_ENABLED);
 
-  if (safeTenantKey) {
-    try {
-      const metaCfg = await getTenantMetaConfig(safeTenantKey);
-      const tenantToken = s(metaCfg?.pageAccessToken);
+  const safeMeta = meta && typeof meta === "object" ? meta : {};
 
-      if (tenantToken) {
-        return {
-          accessToken: tenantToken,
-          source: "tenant_secret",
-        };
-      }
-    } catch {
-      // ignore and continue to fallback
+  const safeChannel = lower(channel || "instagram") || "instagram";
+  const safeRecipientId = firstNonEmpty(
+    recipientId,
+    safeMeta.recipientId,
+    safeMeta.externalRecipientId
+  );
+
+  const safePageId = firstNonEmpty(
+    pageId,
+    safeMeta.pageId,
+    safeMeta.page_id,
+    safeMeta.externalPageId,
+    safeMeta.external_page_id
+  );
+
+  const safeIgUserId = firstNonEmpty(
+    igUserId,
+    safeMeta.igUserId,
+    safeMeta.ig_user_id,
+    safeMeta.instagramBusinessAccountId,
+    safeMeta.instagram_business_account_id,
+    safeMeta.externalUserId,
+    safeMeta.external_user_id
+  );
+
+  try {
+    const metaCfg = await getTenantMetaConfigByChannel({
+      channel: safeChannel,
+      recipientId: safeRecipientId,
+      pageId: safePageId,
+      igUserId: safeIgUserId,
+    });
+
+    const tenantToken = s(metaCfg?.pageAccessToken);
+
+    logInfo("meta credential resolve", {
+      tenantKey: safeTenantKey,
+      channel: safeChannel,
+      recipientId: safeRecipientId,
+      pageId: safePageId,
+      igUserId: safeIgUserId,
+      hasTenantToken: Boolean(tenantToken),
+      source: s(metaCfg?.source || ""),
+      error: s(metaCfg?.error || ""),
+      status: Number(metaCfg?.status || 0),
+    });
+
+    if (tenantToken) {
+      return {
+        accessToken: tenantToken,
+        source: "tenant_secret",
+        pageId: s(metaCfg?.pageId || safePageId),
+        igUserId: s(metaCfg?.igUserId || safeIgUserId),
+      };
     }
+  } catch (err) {
+    logWarn("meta credential resolve failed", {
+      tenantKey: safeTenantKey,
+      channel: safeChannel,
+      recipientId: safeRecipientId,
+      pageId: safePageId,
+      igUserId: safeIgUserId,
+      error: s(err?.message || err),
+    });
   }
 
   if (allowEnvFallback && envToken) {
     return {
       accessToken: envToken,
       source: "env",
+      pageId: safePageId,
+      igUserId: safeIgUserId,
     };
   }
 
   return {
     accessToken: "",
     source: "none",
+    pageId: safePageId,
+    igUserId: safeIgUserId,
   };
 }
 
 async function postJson(url, body, opts = {}) {
   const safeTenantKey = lower(opts?.tenantKey || "");
+  const safeChannel = lower(opts?.channel || "instagram") || "instagram";
+  const safeRecipientId = s(opts?.recipientId || "");
+  const safePageId = s(opts?.pageId || "");
+  const safeIgUserId = s(opts?.igUserId || "");
+  const safeMeta = opts?.meta && typeof opts.meta === "object" ? opts.meta : {};
+
   const creds = await resolveMetaAccessToken({
     tenantKey: safeTenantKey,
+    channel: safeChannel,
+    recipientId: safeRecipientId,
+    pageId: safePageId,
+    igUserId: safeIgUserId,
+    meta: safeMeta,
   });
 
   const token = s(creds.accessToken);
@@ -99,6 +195,10 @@ async function postJson(url, body, opts = {}) {
       {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       }
     );
   }
@@ -133,6 +233,10 @@ async function postJson(url, body, opts = {}) {
       meta: {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       },
     };
   } catch (err) {
@@ -143,6 +247,10 @@ async function postJson(url, body, opts = {}) {
       {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       }
     );
   } finally {
@@ -152,8 +260,19 @@ async function postJson(url, body, opts = {}) {
 
 async function postForm(url, params, opts = {}) {
   const safeTenantKey = lower(opts?.tenantKey || "");
+  const safeChannel = lower(opts?.channel || "instagram") || "instagram";
+  const safeRecipientId = s(opts?.recipientId || "");
+  const safePageId = s(opts?.pageId || "");
+  const safeIgUserId = s(opts?.igUserId || "");
+  const safeMeta = opts?.meta && typeof opts.meta === "object" ? opts.meta : {};
+
   const creds = await resolveMetaAccessToken({
     tenantKey: safeTenantKey,
+    channel: safeChannel,
+    recipientId: safeRecipientId,
+    pageId: safePageId,
+    igUserId: safeIgUserId,
+    meta: safeMeta,
   });
 
   const token = s(creds.accessToken);
@@ -165,6 +284,10 @@ async function postForm(url, params, opts = {}) {
       {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       }
     );
   }
@@ -205,6 +328,10 @@ async function postForm(url, params, opts = {}) {
       meta: {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       },
     };
   } catch (err) {
@@ -215,6 +342,10 @@ async function postForm(url, params, opts = {}) {
       {
         credentialSource: creds.source,
         tenantKey: safeTenantKey,
+        channel: safeChannel,
+        recipientId: safeRecipientId,
+        pageId: safePageId,
+        igUserId: safeIgUserId,
       }
     );
   } finally {
@@ -243,6 +374,9 @@ async function sendText({
   text,
   messagingType = "RESPONSE",
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   const recipient = requireRecipient(recipientId);
   if (!recipient.ok) return fail(recipient.error);
@@ -257,11 +391,25 @@ async function sendText({
       messaging_type: s(messagingType || "RESPONSE") || "RESPONSE",
       message: { text: bodyText },
     },
-    { tenantKey }
+    {
+      tenantKey,
+      channel: "instagram",
+      recipientId: recipient.value,
+      pageId,
+      igUserId,
+      meta,
+    }
   );
 }
 
-async function sendSenderAction({ recipientId, action, tenantKey = "" }) {
+async function sendSenderAction({
+  recipientId,
+  action,
+  tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
+}) {
   const recipient = requireRecipient(recipientId);
   if (!recipient.ok) return fail(recipient.error);
 
@@ -274,7 +422,14 @@ async function sendSenderAction({ recipientId, action, tenantKey = "" }) {
       recipient: buildRecipient(recipient.value),
       sender_action: senderAction,
     },
-    { tenantKey }
+    {
+      tenantKey,
+      channel: "instagram",
+      recipientId: recipient.value,
+      pageId,
+      igUserId,
+      meta,
+    }
   );
 }
 
@@ -282,6 +437,9 @@ async function sendPrivateCommentReply({
   commentId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   const comment = requireCommentId(commentId);
   if (!comment.ok) return fail(comment.error);
@@ -292,7 +450,13 @@ async function sendPrivateCommentReply({
   return postForm(
     graphNodeEndpoint(comment.value, "private_replies"),
     { message: bodyText },
-    { tenantKey }
+    {
+      tenantKey,
+      channel: "instagram",
+      pageId,
+      igUserId,
+      meta,
+    }
   );
 }
 
@@ -300,45 +464,69 @@ export async function sendInstagramTextMessage({
   recipientId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendText({
     recipientId,
     text,
     messagingType: "RESPONSE",
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }
 
 export async function sendInstagramSeen({
   recipientId,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendSenderAction({
     recipientId,
     action: "mark_seen",
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }
 
 export async function sendInstagramTypingOn({
   recipientId,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendSenderAction({
     recipientId,
     action: "typing_on",
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }
 
 export async function sendInstagramTypingOff({
   recipientId,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendSenderAction({
     recipientId,
     action: "typing_off",
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }
 
@@ -346,6 +534,9 @@ export async function sendInstagramCommentReply({
   commentId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   const comment = requireCommentId(commentId);
   if (!comment.ok) return fail(comment.error);
@@ -356,7 +547,13 @@ export async function sendInstagramCommentReply({
   return postForm(
     graphNodeEndpoint(comment.value, "replies"),
     { message: bodyText },
-    { tenantKey }
+    {
+      tenantKey,
+      channel: "instagram",
+      pageId,
+      igUserId,
+      meta,
+    }
   );
 }
 
@@ -364,11 +561,17 @@ export async function sendInstagramPrivateCommentReply({
   commentId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendPrivateCommentReply({
     commentId,
     text,
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }
 
@@ -376,6 +579,9 @@ export async function sendFacebookCommentReply({
   commentId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   const comment = requireCommentId(commentId);
   if (!comment.ok) return fail(comment.error);
@@ -386,7 +592,13 @@ export async function sendFacebookCommentReply({
   return postForm(
     graphNodeEndpoint(comment.value, "comments"),
     { message: bodyText },
-    { tenantKey }
+    {
+      tenantKey,
+      channel: "facebook",
+      pageId,
+      igUserId,
+      meta,
+    }
   );
 }
 
@@ -394,10 +606,16 @@ export async function sendFacebookPrivateCommentReply({
   commentId,
   text,
   tenantKey = "",
+  pageId = "",
+  igUserId = "",
+  meta = null,
 }) {
   return sendPrivateCommentReply({
     commentId,
     text,
     tenantKey,
+    pageId,
+    igUserId,
+    meta,
   });
 }

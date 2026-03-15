@@ -335,6 +335,12 @@ async function handleSupportedTextEvent(ev, rawBody) {
     recipientId: s(ev?.userId || ""),
     tenantKey: resolvedTenantKey,
     threadId: s(out?.json?.thread?.id || ""),
+    pageId: s(ev?.pageId || ""),
+    igUserId: s(ev?.igUserId || ""),
+    meta: {
+      pageId: s(ev?.pageId || ""),
+      igUserId: s(ev?.igUserId || ""),
+    },
   });
 
   logInfo("text action execution summary", {
@@ -408,6 +414,14 @@ async function handleSupportedCommentEvent(ev, rawBody) {
     threadId: s(out?.json?.thread?.id || ""),
     externalCommentId: s(ev?.externalCommentId || ""),
     externalPostId: s(ev?.externalPostId || ""),
+    pageId: s(ev?.pageId || ""),
+    igUserId: s(ev?.igUserId || ""),
+    meta: {
+      pageId: s(ev?.pageId || ""),
+      igUserId: s(ev?.igUserId || ""),
+      externalCommentId: s(ev?.externalCommentId || ""),
+      externalPostId: s(ev?.externalPostId || ""),
+    },
   });
 
   logInfo("comment action execution summary", {

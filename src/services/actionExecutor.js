@@ -38,7 +38,14 @@ function okResult({ type, channel, meta = null, response = null }) {
   };
 }
 
-function failResult({ type, channel, error, status = 0, meta = null, response = null }) {
+function failResult({
+  type,
+  channel,
+  error,
+  status = 0,
+  meta = null,
+  response = null,
+}) {
   return {
     type: s(type || "unknown"),
     channel: s(channel || "unknown"),
@@ -117,6 +124,44 @@ function pickTenantId(action, ctx = {}) {
         ctxMeta?.tenant_id ||
         ""
     ) || ""
+  );
+}
+
+function pickPageId(action, ctx = {}) {
+  const meta = isObject(action?.meta) ? action.meta : {};
+  const ctxMeta = isObject(ctx?.meta) ? ctx.meta : {};
+
+  return s(
+    action?.pageId ||
+      action?.page_id ||
+      meta?.pageId ||
+      meta?.page_id ||
+      ctx?.pageId ||
+      ctx?.page_id ||
+      ctxMeta?.pageId ||
+      ctxMeta?.page_id ||
+      ""
+  );
+}
+
+function pickIgUserId(action, ctx = {}) {
+  const meta = isObject(action?.meta) ? action.meta : {};
+  const ctxMeta = isObject(ctx?.meta) ? ctx.meta : {};
+
+  return s(
+    action?.igUserId ||
+      action?.ig_user_id ||
+      meta?.igUserId ||
+      meta?.ig_user_id ||
+      meta?.instagramBusinessAccountId ||
+      meta?.instagram_business_account_id ||
+      ctx?.igUserId ||
+      ctx?.ig_user_id ||
+      ctxMeta?.igUserId ||
+      ctxMeta?.ig_user_id ||
+      ctxMeta?.instagramBusinessAccountId ||
+      ctxMeta?.instagram_business_account_id ||
+      ""
   );
 }
 
@@ -259,12 +304,16 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
 
   const tenantKey = pickTenantKey(action, ctx);
   const tenantId = pickTenantId(action, ctx) || null;
+  const pageId = pickPageId(action, ctx);
+  const igUserId = pickIgUserId(action, ctx);
 
   const out = await sender({
     recipientId,
     text,
     tenantKey,
     tenantId,
+    pageId,
+    igUserId,
     meta: meta || {},
   });
 
@@ -308,6 +357,8 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
       threadId: s(meta?.threadId || ctx?.threadId || ""),
       recipientId,
       tenantKey,
+      pageId,
+      igUserId,
       error: s(out?.error || "unknown send error"),
       status: Number(out?.status || 0),
     });
@@ -323,6 +374,8 @@ async function runSendMessage({ action, ctx, channel, recipientId, meta, sender 
       ...(meta || {}),
       tenantKey,
       tenantId,
+      pageId,
+      igUserId,
       outboundAckSkipped: skipAck,
       outboundAck: outboundAck || null,
     },
@@ -373,12 +426,16 @@ async function runReplyComment({
 
   const tenantKey = pickTenantKey(action, ctx);
   const tenantId = pickTenantId(action, ctx) || null;
+  const pageId = pickPageId(action, ctx);
+  const igUserId = pickIgUserId(action, ctx);
 
   const out = await sender({
     commentId,
     text,
     tenantKey,
     tenantId,
+    pageId,
+    igUserId,
     meta: meta || {},
   });
 
@@ -387,6 +444,8 @@ async function runReplyComment({
       channel,
       commentId,
       tenantKey,
+      pageId,
+      igUserId,
       error: s(out?.error || `unknown ${actionType} error`),
       status: Number(out?.status || 0),
     });
@@ -415,6 +474,8 @@ async function runReplyComment({
       ...(meta || {}),
       tenantKey,
       tenantId,
+      pageId,
+      igUserId,
       externalCommentId: commentId,
       privateReply: actionType === "private_reply_comment",
     },
@@ -425,11 +486,15 @@ async function runReplyComment({
 async function runSeen({ type, action, ctx, channel, recipientId, meta, sender }) {
   const tenantKey = pickTenantKey(action, ctx);
   const tenantId = pickTenantId(action, ctx) || null;
+  const pageId = pickPageId(action, ctx);
+  const igUserId = pickIgUserId(action, ctx);
 
   const out = await sender({
     recipientId,
     tenantKey,
     tenantId,
+    pageId,
+    igUserId,
     meta: meta || {},
   });
 
@@ -437,6 +502,8 @@ async function runSeen({ type, action, ctx, channel, recipientId, meta, sender }
     logWarn("mark_seen failed", {
       recipientId,
       tenantKey,
+      pageId,
+      igUserId,
       error: s(out?.error || "unknown mark_seen error"),
       status: Number(out?.status || 0),
     });
@@ -452,6 +519,8 @@ async function runSeen({ type, action, ctx, channel, recipientId, meta, sender }
       ...(meta || {}),
       tenantKey,
       tenantId,
+      pageId,
+      igUserId,
     },
     response: out.json || null,
   };
@@ -460,11 +529,15 @@ async function runSeen({ type, action, ctx, channel, recipientId, meta, sender }
 async function runTyping({ type, action, ctx, channel, recipientId, meta, sender, logLabel }) {
   const tenantKey = pickTenantKey(action, ctx);
   const tenantId = pickTenantId(action, ctx) || null;
+  const pageId = pickPageId(action, ctx);
+  const igUserId = pickIgUserId(action, ctx);
 
   const out = await sender({
     recipientId,
     tenantKey,
     tenantId,
+    pageId,
+    igUserId,
     meta: meta || {},
   });
 
@@ -472,6 +545,8 @@ async function runTyping({ type, action, ctx, channel, recipientId, meta, sender
     logWarn(`${logLabel} failed`, {
       recipientId,
       tenantKey,
+      pageId,
+      igUserId,
       error: s(out?.error || `unknown ${logLabel} error`),
       status: Number(out?.status || 0),
     });
@@ -487,6 +562,8 @@ async function runTyping({ type, action, ctx, channel, recipientId, meta, sender
       ...(meta || {}),
       tenantKey,
       tenantId,
+      pageId,
+      igUserId,
     },
     response: out.json || null,
   };
